@@ -55,7 +55,7 @@
             border: 1px solid #e2ded0;
             border-radius: 10px;
             padding: 14px;
-            margin-bottom: 24px;
+            margin-bottom: 20px;
             text-align: left;
         }
         .account-select-box label {
@@ -65,7 +65,7 @@
             color: #888;
             margin-bottom: 6px;
         }
-        .account-select-box select, .account-select-box input {
+        .account-select-box select {
             width: 100%;
             padding: 10px;
             border: 1px solid #ccc;
@@ -73,6 +73,17 @@
             font-size: 15px;
             font-weight: 600;
             background: #fff;
+        }
+        .status-badge-area {
+            margin-top: 8px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .badge-ready {
+            color: #2e543c;
+        }
+        .badge-unregistered {
+            color: #b23a3a;
         }
         .approve-btn {
             width: 100%;
@@ -91,7 +102,12 @@
             box-shadow: 0 4px 12px rgba(46, 84, 60, 0.25);
             transition: transform 0.1s, background 0.2s;
         }
-        .approve-btn:active {
+        .approve-btn:disabled {
+            background: #ccc;
+            box-shadow: none;
+            cursor: not-allowed;
+        }
+        .approve-btn:active:not(:disabled) {
             transform: scale(0.98);
         }
         .reject-btn {
@@ -133,17 +149,21 @@
 
     <div id="approveFormArea">
         <div class="account-select-box">
-            <label for="usernameSelect">로그인할 계정</label>
-            <select id="usernameSelect">
+            <label for="usernameSelect">승인할 계정 선택</label>
+            <select id="usernameSelect" onchange="checkPasskeyStatus()">
                 {% for u in users %}
-                <option value="{{ u.username }}" {% if u.username == 'admin' %}selected{% endif %}>{{ u.username }}</option>
+                <option value="{{ u.username }}" data-has-passkey="{{ '1' if u.has_passkey else '0' }}" {% if u.username == 'admin' %}selected{% endif %}>
+                    {{ u.username }} {% if not u.has_passkey %}(패스키 미등록){% endif %}
+                </option>
                 {% endfor %}
             </select>
+
+            <div id="passkeyBadge" class="status-badge-area"></div>
         </div>
 
         <button type="button" class="approve-btn" id="approveBtn" onclick="handleMobileApprove()">
             <span>👆</span>
-            <span>지문 / 생체인증으로 컴퓨터 승인</span>
+            <span>지문 / Face ID로 컴퓨터 승인</span>
         </button>
 
         <button type="button" class="reject-btn" onclick="window.close();">거절 및 닫기</button>
@@ -155,62 +175,119 @@
 <script>
     const qrToken = "{{ token }}";
 
+    function b64urlToBuffer(b64url) {
+        const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+        const bin = atob(b64 + pad);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes.buffer;
+    }
+
+    function bufferToB64url(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let bin = '';
+        for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    function checkPasskeyStatus() {
+        const sel = document.getElementById('usernameSelect');
+        const opt = sel.options[sel.selectedIndex];
+        const hasPasskey = opt.getAttribute('data-has-passkey') === '1';
+        const badge = document.getElementById('passkeyBadge');
+        const btn = document.getElementById('approveBtn');
+
+        if (hasPasskey) {
+            badge.className = 'status-badge-area badge-ready';
+            badge.innerHTML = '🔒 등록된 패스키 기기 확인됨 (지문 승인 가능)';
+            btn.disabled = false;
+        } else {
+            badge.className = 'status-badge-area badge-unregistered';
+            badge.innerHTML = '⚠️ 등록된 패스키가 없는 계정입니다.<br><small style="font-weight:normal;color:#666;">먼저 해당 계정으로 로그인하여 [패스키 등록]을 해야만 지문 승인이 가능합니다.</small>';
+            btn.disabled = true;
+        }
+    }
+
     async function handleMobileApprove() {
         const username = document.getElementById('usernameSelect').value;
         const btn = document.getElementById('approveBtn');
-        const origText = btn.innerHTML;
-        btn.disabled = true;
-        btn.innerHTML = '<span>⌛</span><span>지문 인식 중...</span>';
+        const resBox = document.getElementById('resultBox');
+        resBox.style.display = 'none';
 
-        // 스마트폰의 WebAuthn 생체인증(지문/Face ID) 호출 시도
-        if (window.PublicKeyCredential) {
-            try {
-                // 브라우저 화면 지문 센서 활성화 챌린지
-                const dummyChallenge = new Uint8Array(32);
-                window.crypto.getRandomValues(dummyChallenge);
-                // 모바일 지문 팝업 유도
-                await navigator.credentials.get({
-                    publicKey: {
-                        challenge: dummyChallenge,
-                        timeout: 30000,
-                        userVerification: 'preferred'
-                    }
-                }).catch(() => {
-                    // 기기 지문 팝업 취소 또는 미등록 시에도 승인 진행 허용
-                });
-            } catch (e) {
-                // 생체센서 패스
-            }
+        if (!window.PublicKeyCredential) {
+            alert('현재 스마트폰 브라우저가 생체인증(WebAuthn)을 지원하지 않습니다.');
+            return;
         }
 
+        const origText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span>⌛</span><span>스마트폰 지문 인식 중...</span>';
+
         try {
-            const res = await fetch('/api/auth/qr/approve', {
+            // 1. 서버에 스마트폰 지문인증용 WebAuthn Assertion 챌린지 요청
+            const optRes = await fetch('/api/auth/qr/approve-options', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ token: qrToken, username: username })
             });
+            const optData = await optRes.json();
 
-            const data = await res.json();
-            const resBox = document.getElementById('resultBox');
+            if (!optRes.ok || !optData.success) {
+                throw new Error(optData.message || '승인 옵션 생성 실패');
+            }
 
-            if (res.ok && data.success) {
+            // 2. 바이너리 버퍼 변환
+            optData.challenge = b64urlToBuffer(optData.challenge);
+            if (optData.allowCredentials && optData.allowCredentials.length > 0) {
+                optData.allowCredentials = optData.allowCredentials.map(c => ({
+                    ...c,
+                    id: b64urlToBuffer(c.id)
+                }));
+            }
+
+            // 3. 스마트폰 화면에 진짜 지문 / Face ID 팝업 띄우기!
+            const assertion = await navigator.credentials.get({ publicKey: optData });
+
+            // 4. 추출된 암호학적 전자서명을 서버로 전송하여 최종 승인
+            const verifyRes = await fetch('/api/auth/qr/approve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    token: qrToken,
+                    username: username,
+                    id: assertion.id,
+                    response: {
+                        authenticatorData: bufferToB64url(assertion.response.authenticatorData),
+                        clientDataJSON: bufferToB64url(assertion.response.clientDataJSON),
+                        signature: bufferToB64url(assertion.response.signature)
+                    }
+                })
+            });
+
+            const verifyData = await verifyRes.json();
+
+            if (verifyRes.ok && verifyData.success) {
                 document.getElementById('approveFormArea').style.display = 'none';
                 resBox.className = 'result-box success';
-                resBox.innerHTML = '<h3>🎉 로그인 승인 완료!</h3><p>컴퓨터(PC) 화면이 <b>' + username + '</b>님으로 자동 로그인되었습니다.<br>모니터 화면을 확인해 주세요!</p>';
+                resBox.innerHTML = '<h3>🎉 지문 서명 검증 성공!</h3><p>컴퓨터(PC) 화면이 <b>' + username + '</b>님으로 자동 로그인되었습니다.<br>모니터 화면을 확인해 주세요!</p>';
                 resBox.style.display = 'block';
             } else {
-                resBox.className = 'result-box error';
-                resBox.innerHTML = '<p>❌ 승인 실패: ' + (data.message || '알 수 없는 오류') + '</p>';
-                resBox.style.display = 'block';
-                btn.disabled = false;
-                btn.innerHTML = origText;
+                throw new Error(verifyData.message || '지문 서명 검증 실패');
             }
         } catch (err) {
-            alert('서버 연결 실패: ' + err.message);
             btn.disabled = false;
             btn.innerHTML = origText;
+            if (err.name === 'NotAllowedError') {
+                alert('지문 인식이 취소되었거나 거절되었습니다.');
+            } else {
+                alert('승인 오류: ' + (err.message || err));
+            }
         }
     }
+
+    // 초기 상태 체크
+    window.addEventListener('DOMContentLoaded', checkPasskeyStatus);
 </script>
 
 </body>

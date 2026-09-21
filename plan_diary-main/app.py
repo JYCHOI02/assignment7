@@ -703,26 +703,120 @@ def mobile_approve_page():
     """스마트폰에서 QR을 찍었을 때 열리는 모바일 지문 승인 화면"""
     token = request.args.get("token", "")
     conn = get_db()
-    users = conn.execute("SELECT id, username FROM users ORDER BY id ASC").fetchall()
+    # 패스키가 1개 이상 등록된 사용자만 승인 가능
+    users_with_passkeys = conn.execute("""
+        SELECT u.id, u.username, COUNT(p.id) as passkey_count
+        FROM users u
+        LEFT JOIN passkeys p ON u.id = p.user_id
+        GROUP BY u.id
+        ORDER BY u.id ASC
+    """).fetchall()
     conn.close()
-    return render_template("mobile_approve.html", token=token, users=[dict(u) for u in users])
+
+    user_list = []
+    for u in users_with_passkeys:
+        user_list.append({
+            "id": u["id"],
+            "username": u["username"],
+            "has_passkey": bool(u["passkey_count"] > 0)
+        })
+
+    return render_template("mobile_approve.html", token=token, users=user_list)
 
 
-@app.route("/api/auth/qr/approve", methods=["POST"])
-def qr_approve():
-    """스마트폰에서 지문 인증 완료 후 컴퓨터 로그인 승인 처리"""
+@app.route("/api/auth/qr/approve-options", methods=["POST"])
+def qr_approve_options():
+    """스마트폰 지문 인증을 위한 WebAuthn Assertion 챌린지 생성"""
     data = request.get_json() or {}
     token = data.get("token")
     username = data.get("username", "").strip()
-
-    if not token or not username:
-        return jsonify({"success": False, "message": "요청 정보가 올바르지 않습니다."}), 400
 
     conn = get_db()
     user = conn.execute("SELECT id, username FROM users WHERE username = ?", (username,)).fetchone()
     if not user:
         conn.close()
-        return jsonify({"success": False, "message": "존재하지 않는 사용자 계정입니다."}), 404
+        return jsonify({"success": False, "message": "존재하지 않는 계정입니다."}), 404
+
+    # 해당 유저의 등록된 패스키 조회
+    keys = conn.execute("SELECT credential_id FROM passkeys WHERE user_id = ?", (user["id"],)).fetchall()
+    conn.close()
+
+    if not keys:
+        return jsonify({
+            "success": False,
+            "message": f"'{username}' 계정에는 등록된 패스키 기기가 없습니다. 먼저 컴퓨터나 스마트폰에서 패스키를 등록해 주세요."
+        }), 400
+
+    # 챌린지 발급
+    challenge = passkey_service.b64url_encode(os.urandom(32))
+    session[f"qr_challenge_{token}"] = challenge
+
+    allow_credentials = [{"type": "public-key", "id": k["credential_id"]} for k in keys]
+
+    return jsonify({
+        "success": True,
+        "challenge": challenge,
+        "allowCredentials": allow_credentials,
+        "rpId": "fixtures-choosing-integrated-concentrate.trycloudflare.com" if "trycloudflare.com" in request.host else "localhost",
+        "timeout": 60000,
+        "userVerification": "required"
+    })
+
+
+@app.route("/api/auth/qr/approve", methods=["POST"])
+def qr_approve():
+    """스마트폰에서 실제 암호학적 지문 서명(WebAuthn) 검증 후 컴퓨터 로그인 승인"""
+    data = request.get_json() or {}
+    token = data.get("token")
+    username = data.get("username", "").strip()
+
+    expected_challenge = session.get(f"qr_challenge_{token}")
+    if not expected_challenge:
+        return jsonify({"success": False, "message": "승인 세션이 만료되었습니다. 다시 시도해 주세요."}), 400
+
+    cred_id = data.get("id")
+    resp = data.get("response", {})
+    auth_data_b64 = resp.get("authenticatorData")
+    client_data_b64 = resp.get("clientDataJSON")
+    sig_b64 = resp.get("signature")
+
+    if not cred_id or not auth_data_b64 or not client_data_b64 or not sig_b64:
+        return jsonify({
+            "success": False,
+            "message": "스마트폰 지문 인증(서명) 데이터가 누락되었습니다. 등록된 지문으로 인증해야 합니다."
+        }), 400
+
+    conn = get_db()
+    # 등록된 패스키 확인 및 소유자 검증
+    passkey_row = conn.execute("""
+        SELECT p.*, u.username, u.id AS uid
+        FROM passkeys p
+        JOIN users u ON p.user_id = u.id
+        WHERE p.credential_id = ? AND u.username = ?
+    """, (cred_id, username)).fetchone()
+
+    if not passkey_row:
+        conn.close()
+        return jsonify({
+            "success": False,
+            "message": f"이 기기는 '{username}' 계정에 등록된 패스키가 아닙니다. 본인이 등록한 기기에서만 승인할 수 있습니다."
+        }), 403
+
+    # 암호학적 서명 검증 수행
+    try:
+        is_valid = passkey_service.verify_assertion(
+            public_key_pem=passkey_row["public_key"],
+            authenticator_data_b64=auth_data_b64,
+            client_data_json_b64=client_data_b64,
+            signature_b64=sig_b64,
+            expected_challenge_b64=expected_challenge
+        )
+        if not is_valid:
+            conn.close()
+            return jsonify({"success": False, "message": "지문 전자서명 검증에 실패했습니다."}), 401
+    except Exception as e:
+        conn.close()
+        return jsonify({"success": False, "message": f"서명 검증 오류: {str(e)}"}), 400
 
     session_row = conn.execute("SELECT * FROM qr_login_sessions WHERE token = ?", (token,)).fetchone()
     if not session_row:
@@ -739,13 +833,16 @@ def qr_approve():
         UPDATE qr_login_sessions
         SET status = 'APPROVED', user_id = ?
         WHERE token = ?
-    """, (user["id"], token))
+    """, (passkey_row["uid"], token))
     conn.commit()
     conn.close()
 
+    # 챌린지 정리
+    session.pop(f"qr_challenge_{token}", None)
+
     return jsonify({
         "success": True,
-        "message": f"🎉 컴퓨터 로그인을 승인했습니다! 모니터 화면을 확인해 주세요."
+        "message": f"🎉 {username}님의 지문 서명이 검증되었습니다! 컴퓨터 화면을 확인해 주세요."
     })
 
 
