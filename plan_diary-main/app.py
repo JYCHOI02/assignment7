@@ -1,4 +1,9 @@
-from flask import Flask, render_template, request, jsonify, Response
+import uuid
+import os
+import passkey_service
+from flask import Flask, render_template, request, jsonify, Response, session, redirect, url_for, abort
+from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
 import sqlite3
 import json
 from datetime import datetime, date, timedelta, timezone
@@ -17,6 +22,11 @@ def get_kst_today_str():
 
 
 app = Flask(__name__)
+# [T07] 보안 세션 설정 (XSS/CSRF 방어 및 세션 수명 관리)
+app.secret_key = "aleph-pds-diary-assignment7-security-key-2026"
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
 
 DATABASE = "database.db"
 
@@ -30,9 +40,34 @@ def get_db():
 def init_db():
     conn = get_db()
 
+    # [T08 / Passkey] 패스키(생체인증/스마트폰 FIDO2) 자격증명 저장 테이블
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS passkeys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            credential_id TEXT UNIQUE NOT NULL,
+            public_key TEXT NOT NULL,
+            sign_count INTEGER NOT NULL DEFAULT 0,
+            device_name TEXT NOT NULL DEFAULT '스마트폰 / 생체인증 기기',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # [T07-C94~C96] 사용자(Users) 테이블 생성
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
 
             title TEXT NOT NULL,
             original_title TEXT NOT NULL DEFAULT '',
@@ -50,9 +85,11 @@ def init_db():
             current_expected_minutes INTEGER NOT NULL,
 
             status TEXT NOT NULL DEFAULT '진행중',
+            tags TEXT NOT NULL DEFAULT '',
 
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
 
@@ -69,13 +106,13 @@ def init_db():
             success_criteria TEXT NOT NULL,
             expected_minutes INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT '진행중',
+            tags TEXT NOT NULL DEFAULT '',
             modified_at TEXT NOT NULL,
             FOREIGN KEY (plan_id) REFERENCES plans(id) ON DELETE CASCADE
         )
     """)
 
     # 실행 기록(Do) 보존을 위한 별도 테이블 생성
-    # 시작/끝 시각, 실제 걸린 시간, 막혔던 이유를 저장하며 이전 기록이 사라지지 않고 누적 보존됨
     conn.execute("""
         CREATE TABLE IF NOT EXISTS execution_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,7 +134,6 @@ def init_db():
     """)
 
     # 완료 기록 단일 보존을 위한 별도 테이블 생성 (plan_id UNIQUE로 중복 생성 방지)
-    # 완료 버튼을 여러 번 눌러도 완료 기록은 1회만 보존됨
     conn.execute("""
         CREATE TABLE IF NOT EXISTS completion_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,11 +147,13 @@ def init_db():
     conn.execute("""
         CREATE TABLE IF NOT EXISTS next_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             action_text TEXT NOT NULL,
             source_type TEXT NOT NULL DEFAULT 'custom',
             source_plan_id INTEGER,
             created_at TEXT NOT NULL,
-            applied_at TEXT
+            applied_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
 
@@ -142,10 +180,12 @@ def init_db():
             VALUES (?, ?)
         """, (comp_row["id"], comp_row["updated_at"]))
 
-    # 기존 데이터베이스 테이블 호환성 유지 (컬럼이 없을 경우 추가)
+    # 테이블 호환성 및 컬럼 추가 (PRAGMA table_info)
     cursor = conn.execute("PRAGMA table_info(plans)")
     columns = [row["name"] for row in cursor.fetchall()]
 
+    if "user_id" not in columns:
+        conn.execute("ALTER TABLE plans ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
     if "status" not in columns:
         conn.execute("ALTER TABLE plans ADD COLUMN status TEXT NOT NULL DEFAULT '진행중'")
     if "original_title" not in columns:
@@ -158,88 +198,571 @@ def init_db():
     if "tags" not in columns:
         conn.execute("ALTER TABLE plans ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
 
+    # next_actions user_id 추가
+    cursor_na = conn.execute("PRAGMA table_info(next_actions)")
+    na_cols = [row["name"] for row in cursor_na.fetchall()]
+    if "user_id" not in na_cols:
+        conn.execute("ALTER TABLE next_actions ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+
     # plan_history 테이블 컬럼 호환성 유지
     cursor_hist = conn.execute("PRAGMA table_info(plan_history)")
     hist_cols = [row["name"] for row in cursor_hist.fetchall()]
     if "tags" not in hist_cols:
         conn.execute("ALTER TABLE plan_history ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
 
-    # 기존 '높음', '보통', '낮음' 우선순위를 '1순위', '2순위'... 형식으로 마이그레이션
-    cursor = conn.execute("SELECT id, original_priority, current_priority FROM plans ORDER BY id ASC")
-    rows = cursor.fetchall()
-    for idx, row in enumerate(rows, start=1):
-        orig_p = row["original_priority"]
-        curr_p = row["current_priority"]
-        updates = []
-        params = []
-        if orig_p in ["높음", "보통", "낮음"]:
-            updates.append("original_priority = ?")
-            params.append(f"{idx}순위")
-        if curr_p in ["높음", "보통", "낮음"]:
-            updates.append("current_priority = ?")
-            params.append(f"{idx}순위")
-        if updates:
-            params.append(row["id"])
-            conn.execute(f"UPDATE plans SET {', '.join(updates)} WHERE id = ?", params)
+    # [T07-C94/요구사항 5] 기존 과제 6 샘플 데이터를 관리자(admin) 계정으로 마이그레이션
+    admin_row = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
+    if not admin_row:
+        now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+        admin_hash = generate_password_hash("admin1234!")
+        cur = conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)", ("admin", admin_hash, now_str))
+        admin_id = cur.lastrowid
+    else:
+        admin_id = admin_row["id"]
 
-    # 기존 데이터 중 수정된 이력이 있으나 plan_history가 비어있는 경우 마이그레이션
-    hist_cnt_row = conn.execute("SELECT COUNT(*) AS cnt FROM plan_history").fetchone()
-    if hist_cnt_row and hist_cnt_row["cnt"] == 0:
-        for row in rows:
-            plan_row = conn.execute("SELECT * FROM plans WHERE id = ?", (row["id"],)).fetchone()
-            if plan_row and (plan_row["updated_at"] != plan_row["created_at"] or (plan_row["original_title"] and plan_row["original_title"] != plan_row["title"])):
-                conn.execute("""
-                    INSERT INTO plan_history (
-                        plan_id, version, title, priority,
-                        start_date, end_date, success_criteria,
-                        expected_minutes, status, modified_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    plan_row["id"],
-                    1,
-                    plan_row["original_title"] or plan_row["title"],
-                    plan_row["original_priority"] or plan_row["current_priority"],
-                    plan_row["original_start_date"] or plan_row["current_start_date"],
-                    plan_row["original_end_date"] or plan_row["current_end_date"],
-                    plan_row["original_success_criteria"] or plan_row["current_success_criteria"],
-                    plan_row["original_expected_minutes"] or plan_row["current_expected_minutes"],
-                    plan_row["status"],
-                    plan_row["updated_at"]
-                ))
-
-    # 최초 실행 시 첫 번째 계획에 5개 이상의 딸린 할 일이 들어있도록 시드 데이터 구성
-    # ("그 계획에 딸린 할 일이 다섯 개 이상 들어 있다" 검증 요구사항 충족)
-    task_cnt_row = conn.execute("SELECT COUNT(*) AS cnt FROM plan_tasks").fetchone()
-    if task_cnt_row and task_cnt_row["cnt"] == 0:
-        first_plan = conn.execute("SELECT id, title, current_end_date FROM plans ORDER BY id ASC LIMIT 1").fetchone()
-        if first_plan:
-            now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
-            due_str = first_plan["current_end_date"] or get_kst_today_str()
-            sample_subtasks = [
-                ("준비 운동 및 전신 스트레칭 (10분)", 1),
-                ("기초 체력 루틴 세트 수행", 1),
-                ("집중 트레이닝 및 코어 단련", 0),
-                ("유산소 인터벌 25분 달리기", 0),
-                ("마무리 쿨다운 및 수분 보충", 0)
-            ]
-            for o_idx, (t_title, t_done) in enumerate(sample_subtasks, start=1):
-                conn.execute("""
-                    INSERT INTO plan_tasks (plan_id, title, is_completed, due_date, order_num, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (first_plan["id"], t_title, t_done, due_str, o_idx, now_str, now_str))
+    # user_id가 NULL인 기존 과제 6 샘플 데이터들을 admin 계정으로 마이그레이션 연동
+    conn.execute("UPDATE plans SET user_id = ? WHERE user_id IS NULL", (admin_id,))
+    conn.execute("UPDATE next_actions SET user_id = ? WHERE user_id IS NULL", (admin_id,))
 
     conn.commit()
     conn.close()
 
 
+# ==============================================================================
+# [T07] 보안 & 인증 헬퍼 함수
+# ==============================================================================
+
+def login_required(f):
+    """비로그인 사용자의 접근을 차단하는 데코레이터 (T07-C97)"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            # API 요청인 경우 JSON 401 반환
+            if request.path.startswith("/api/"):
+                return jsonify({
+                    "error": "Unauthorized",
+                    "message": "로그인이 필요한 요청입니다."
+                }), 401
+            # 페이지 접근인 경우 로그인 페이지로 강제 리다이렉트 (T07-C97)
+            return redirect(url_for("login_page"))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def check_plan_ownership(conn, plan_id, user_id):
+    """지정된 plan_id가 해당 user_id의 소유인지 검증 (타인 데이터 침범 방지)"""
+    try:
+        plan = conn.execute("SELECT * FROM plans WHERE id = ? AND user_id = ?", (int(plan_id), int(user_id))).fetchone()
+        return plan
+    except (ValueError, TypeError):
+        return None
+
+
+# ==============================================================================
+# [T07-C94~C99] 인증 라우트 (회원가입, 로그인, 로그아웃, 상태 확인)
+# ==============================================================================
+
+@app.route("/login")
+def login_page():
+    # 이미 로그인된 상태라면 메인 화면으로 이동
+    if "user_id" in session:
+        return redirect(url_for("index"))
+    return render_template("login.html")
+
+
+@app.route("/api/auth/register", methods=["POST"])
+def api_register():
+    data = request.get_json() or {}
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", ""))
+
+    if not username:
+        return jsonify({"success": False, "message": "아이디를 입력해 주세요."}), 400
+    if len(username) < 2 or len(username) > 30:
+        return jsonify({"success": False, "message": "아이디는 2자 이상 30자 이하로 입력해 주세요."}), 400
+    if not password or len(password) < 4:
+        return jsonify({"success": False, "message": "비밀번호는 최소 4자 이상 입력해 주세요."}), 400
+
+    conn = get_db()
+    # [T07-C98] 중복 아이디 가입 방지
+    existing = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+    if existing:
+        conn.close()
+        return jsonify({
+            "success": False,
+            "message": "이미 사용 중인 아이디입니다. 다른 아이디를 입력해 주세요."
+        }), 409
+
+    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+    pw_hash = generate_password_hash(password)
+    conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)", (username, pw_hash, now_str))
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "success": True,
+        "message": "회원가입이 완료되었습니다! 로그인해 주세요."
+    }), 201
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_login():
+    data = request.get_json() or {}
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", ""))
+
+    if not username or not password:
+        # [T07-C99] 계정 열거 방지
+        return jsonify({"success": False, "message": "아이디 또는 비밀번호가 올바르지 않습니다."}), 401
+
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+
+    # [T07-C99] 로그인 실패 시 보안 처리 (계정 열거 방지)
+    # 아이디가 없는 경우와 비밀번호가 틀린 경우 동일한 에러 메시지 반환
+    if not user or not check_password_hash(user["password_hash"], password):
+        conn.close()
+        return jsonify({
+            "success": False,
+            "message": "아이디 또는 비밀번호가 올바르지 않습니다."
+        }), 401
+
+    conn.close()
+
+    # 세션 수립 (세션 고정 공격 방지용 session.clear 후 등록)
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+
+    return jsonify({
+        "success": True,
+        "message": f"{user['username']}님, 환영합니다!",
+        "user": {
+            "id": user["id"],
+            "username": user["username"]
+        }
+    })
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_logout():
+    # [T07-C96] 로그아웃 시 세션 파기
+    session.clear()
+    return jsonify({
+        "success": True,
+        "message": "성공적으로 로그아웃되었습니다."
+    })
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def api_me():
+    if "user_id" in session:
+        return jsonify({
+            "authenticated": True,
+            "user": {
+                "id": session["user_id"],
+                "username": session["username"]
+            }
+        })
+    return jsonify({"authenticated": False, "user": None}), 401
+
+
+# ==============================================================================
+# 메인 페이지 (T07-C97 로그인 필수)
+# ==============================================================================
+
+
+# ==============================================================================
+# [Passkey / WebAuthn] 스마트폰 & 생체인증 (FIDO2) 엔드포인트
+# ==============================================================================
+
+@app.route("/api/auth/passkey/register-options", methods=["POST"])
+@login_required
+def passkey_register_options():
+    """패스키 등록 옵션 생성 (로그인된 상태에서 내 폰/기기 등록)"""
+    user_id = session["user_id"]
+    username = session["username"]
+
+    # 32바이트 무작위 챌린지 생성
+    challenge = passkey_service.b64url_encode(os.urandom(32))
+    session["passkey_reg_challenge"] = challenge
+
+    user_handle = passkey_service.b64url_encode(str(user_id).encode("utf-8"))
+
+    options = {
+        "challenge": challenge,
+        "rp": {
+            "name": "플랜두씨 다이어리",
+            "id": "localhost" if request.host.split(":")[0] in ["127.0.0.1", "localhost"] else request.host.split(":")[0]
+        },
+        "user": {
+            "id": user_handle,
+            "name": username,
+            "displayName": f"{username}님의 플랜두씨 계정"
+        },
+        "pubKeyCredParams": [
+            {"type": "public-key", "alg": -7},   # ES256 (P-256)
+            {"type": "public-key", "alg": -257}  # RS256
+        ],
+        "authenticatorSelection": {
+            "residentKey": "preferred",
+            "userVerification": "preferred"
+        },
+        "timeout": 60000,
+        "attestation": "none"
+    }
+
+    return jsonify(options)
+
+
+@app.route("/api/auth/passkey/register-verify", methods=["POST"])
+@login_required
+def passkey_register_verify():
+    """브라우저의 WebAuthn 생성 결과 검증 및 패스키 등록"""
+    user_id = session["user_id"]
+    data = request.get_json() or {}
+
+    expected_challenge = session.get("passkey_reg_challenge")
+    if not expected_challenge:
+        return jsonify({"success": False, "message": "세션이 만료되었습니다. 다시 시도해 주세요."}), 400
+
+    resp = data.get("response", {})
+    attestation_b64 = resp.get("attestationObject")
+    client_data_b64 = resp.get("clientDataJSON")
+    device_name = data.get("device_name", "").strip() or "스마트폰 / 생체인증 기기"
+
+    if not attestation_b64 or not client_data_b64:
+        return jsonify({"success": False, "message": "인증 데이터가 누락되었습니다."}), 400
+
+    try:
+        # 1. clientDataJSON 챌린지 검증
+        client_data_bytes = passkey_service.b64url_decode(client_data_b64)
+        client_data = json.loads(client_data_bytes.decode("utf-8"))
+
+        if client_data.get("type") != "webauthn.create":
+            return jsonify({"success": False, "message": "올바르지 않은 인증 타입입니다."}), 400
+
+        c_challenge = client_data.get("challenge", "").replace("-", "+").replace("_", "/").rstrip("=")
+        e_challenge = expected_challenge.replace("-", "+").replace("_", "/").rstrip("=")
+        if c_challenge != e_challenge:
+            return jsonify({"success": False, "message": "챌린지 검증에 실패했습니다."}), 400
+
+        # 2. attestationObject 파싱 및 공개키 추출
+        att_bytes = passkey_service.b64url_decode(attestation_b64)
+        parsed = passkey_service.parse_attestation_object(att_bytes)
+
+        cred_id_b64 = parsed["credential_id_b64"]
+        pub_key_pem = parsed["public_key_pem"]
+
+        now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO passkeys (user_id, credential_id, public_key, device_name, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, cred_id_b64, pub_key_pem, device_name, now_str))
+        conn.commit()
+        conn.close()
+
+        # 사용한 챌린지 제거
+        session.pop("passkey_reg_challenge", None)
+
+        return jsonify({
+            "success": True,
+            "message": "스마트폰 / 생체인증(패스키) 등록이 성공적으로 완료되었습니다!"
+        }), 201
+
+    except Exception as err:
+        return jsonify({"success": False, "message": f"패스키 등록 실패: {str(err)}"}), 400
+
+
+@app.route("/api/auth/passkey/login-options", methods=["POST"])
+def passkey_login_options():
+    """패스키 로그인 챌린지 생성"""
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+
+    challenge = passkey_service.b64url_encode(os.urandom(32))
+    session["passkey_login_challenge"] = challenge
+
+    allow_credentials = []
+    if username:
+        conn = get_db()
+        user = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+        if user:
+            keys = conn.execute("SELECT credential_id FROM passkeys WHERE user_id = ?", (user["id"],)).fetchall()
+            for k in keys:
+                allow_credentials.append({
+                    "type": "public-key",
+                    "id": k["credential_id"]
+                })
+        conn.close()
+
+    options = {
+        "challenge": challenge,
+        "timeout": 60000,
+        "rpId": "localhost" if request.host.split(":")[0] in ["127.0.0.1", "localhost"] else request.host.split(":")[0],
+        "userVerification": "preferred",
+        "allowCredentials": allow_credentials
+    }
+
+    return jsonify(options)
+
+
+@app.route("/api/auth/passkey/login-verify", methods=["POST"])
+def passkey_login_verify():
+    """패스키 생체인증 서명 검증 후 세션 수립 (1초 로그인)"""
+    data = request.get_json() or {}
+    expected_challenge = session.get("passkey_login_challenge")
+
+    if not expected_challenge:
+        return jsonify({"success": False, "message": "로그인 세션이 만료되었습니다. 다시 시도해 주세요."}), 400
+
+    cred_id = data.get("id")
+    resp = data.get("response", {})
+    auth_data_b64 = resp.get("authenticatorData")
+    client_data_b64 = resp.get("clientDataJSON")
+    sig_b64 = resp.get("signature")
+
+    if not cred_id or not auth_data_b64 or not client_data_b64 or not sig_b64:
+        return jsonify({"success": False, "message": "인증 파라미터가 누락되었습니다."}), 400
+
+    conn = get_db()
+    # 등록된 패스키 및 소유자 조회
+    row = conn.execute("""
+        SELECT p.*, u.username, u.id AS uid
+        FROM passkeys p
+        JOIN users u ON p.user_id = u.id
+        WHERE p.credential_id = ?
+    """, (cred_id,)).fetchone()
+
+    if not row:
+        conn.close()
+        return jsonify({"success": False, "message": "등록되지 않은 패스키 기기입니다."}), 401
+
+    try:
+        # 서명 검증 수행
+        is_valid = passkey_service.verify_assertion(
+            public_key_pem=row["public_key"],
+            authenticator_data_b64=auth_data_b64,
+            client_data_json_b64=client_data_b64,
+            signature_b64=sig_b64,
+            expected_challenge_b64=expected_challenge
+        )
+
+        if not is_valid:
+            conn.close()
+            return jsonify({"success": False, "message": "생체인증 서명 검증에 실패했습니다."}), 401
+
+        # 로그인 성공 -> 세션 수립
+        session.clear()
+        session.permanent = True
+        session["user_id"] = row["uid"]
+        session["username"] = row["username"]
+
+        conn.close()
+        return jsonify({
+            "success": True,
+            "message": f"🔑 {row['username']}님, 스마트폰/생체인증으로 환영합니다!",
+            "user": {
+                "id": row["uid"],
+                "username": row["username"]
+            }
+        })
+
+    except Exception as err:
+        conn.close()
+        return jsonify({"success": False, "message": f"패스키 검증 오류: {str(err)}"}), 400
+
+
+@app.route("/api/auth/passkeys", methods=["GET"])
+@login_required
+def get_user_passkeys():
+    """현재 사용자가 등록한 패스키 기기 목록 반환"""
+    user_id = session["user_id"]
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT id, device_name, created_at
+        FROM passkeys
+        WHERE user_id = ?
+        ORDER BY id DESC
+    """, (user_id,)).fetchall()
+    conn.close()
+
+    return jsonify({
+        "passkeys": [dict(r) for r in rows],
+        "count": len(rows)
+    })
+
+
+@app.route("/api/auth/passkey/<int:passkey_id>", methods=["DELETE"])
+@login_required
+def delete_user_passkey(passkey_id):
+    """패스키 기기 삭제"""
+    user_id = session["user_id"]
+    conn = get_db()
+    conn.execute("DELETE FROM passkeys WHERE id = ? AND user_id = ?", (passkey_id, user_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"success": True, "message": "패스키 기기가 삭제되었습니다."})
+
+
+
+# ==============================================================================
+# [QR Remote Approval] 스마트폰 지문인증으로 컴퓨터 자동 로그인 (카카오톡/토스 방식)
+# ==============================================================================
+
+@app.route("/api/auth/qr/create", methods=["POST"])
+def qr_create():
+    """PC 화면에 띄울 일회용 로그인 세션 토큰 및 QR URL 생성"""
+    token = str(uuid.uuid4())
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+    expires_str = (now_kst + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS qr_login_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT UNIQUE NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            user_id INTEGER,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        INSERT INTO qr_login_sessions (token, status, created_at, expires_at)
+        VALUES (?, 'PENDING', ?, ?)
+    """, (token, now_str, expires_str))
+    conn.commit()
+    conn.close()
+
+    # 터널 URL 우선, 없으면 request.host_url
+    base_url = "https://fixtures-choosing-integrated-concentrate.trycloudflare.com"
+    approve_url = f"{base_url}/mobile-approve?token={token}"
+
+    return jsonify({
+        "success": True,
+        "token": token,
+        "approve_url": approve_url,
+        "expires_in": 300
+    })
+
+
+@app.route("/api/auth/qr/poll", methods=["GET"])
+def qr_poll():
+    """PC 브라우저가 1초마다 상태 확인 (스마트폰 승인 시 PC 자동 로그인)"""
+    token = request.args.get("token")
+    if not token:
+        return jsonify({"status": "INVALID"}), 400
+
+    conn = get_db()
+    row = conn.execute("""
+        SELECT q.*, u.username
+        FROM qr_login_sessions q
+        LEFT JOIN users u ON q.user_id = u.id
+        WHERE q.token = ?
+    """, (token,)).fetchone()
+
+    if not row:
+        conn.close()
+        return jsonify({"status": "NOT_FOUND"}), 404
+
+    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+    if row["expires_at"] < now_str:
+        conn.close()
+        return jsonify({"status": "EXPIRED"})
+
+    if row["status"] == "APPROVED" and row["user_id"]:
+        # 스마트폰에서 지문 인증 승인 완료 -> PC 세션 자동 수립!
+        session.clear()
+        session.permanent = True
+        session["user_id"] = row["user_id"]
+        session["username"] = row["username"]
+
+        # 1회 사용 후 토큰 폐기 (재사용 방지)
+        conn.execute("UPDATE qr_login_sessions SET status = 'CONSUMED' WHERE token = ?", (token,))
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "status": "APPROVED",
+            "message": f"🔑 {row['username']}님, 스마트폰 지문인증으로 컴퓨터에 로그인되었습니다!",
+            "username": row["username"]
+        })
+
+    conn.close()
+    return jsonify({"status": row["status"]})
+
+
+@app.route("/mobile-approve")
+def mobile_approve_page():
+    """스마트폰에서 QR을 찍었을 때 열리는 모바일 지문 승인 화면"""
+    token = request.args.get("token", "")
+    conn = get_db()
+    users = conn.execute("SELECT id, username FROM users ORDER BY id ASC").fetchall()
+    conn.close()
+    return render_template("mobile_approve.html", token=token, users=[dict(u) for u in users])
+
+
+@app.route("/api/auth/qr/approve", methods=["POST"])
+def qr_approve():
+    """스마트폰에서 지문 인증 완료 후 컴퓨터 로그인 승인 처리"""
+    data = request.get_json() or {}
+    token = data.get("token")
+    username = data.get("username", "").strip()
+
+    if not token or not username:
+        return jsonify({"success": False, "message": "요청 정보가 올바르지 않습니다."}), 400
+
+    conn = get_db()
+    user = conn.execute("SELECT id, username FROM users WHERE username = ?", (username,)).fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"success": False, "message": "존재하지 않는 사용자 계정입니다."}), 404
+
+    session_row = conn.execute("SELECT * FROM qr_login_sessions WHERE token = ?", (token,)).fetchone()
+    if not session_row:
+        conn.close()
+        return jsonify({"success": False, "message": "유효하지 않은 QR 세션입니다."}), 404
+
+    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+    if session_row["expires_at"] < now_str or session_row["status"] != "PENDING":
+        conn.close()
+        return jsonify({"success": False, "message": "만료되었거나 이미 사용된 QR 세션입니다."}), 400
+
+    # 승인 완료 처리
+    conn.execute("""
+        UPDATE qr_login_sessions
+        SET status = 'APPROVED', user_id = ?
+        WHERE token = ?
+    """, (user["id"], token))
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "success": True,
+        "message": f"🎉 컴퓨터 로그인을 승인했습니다! 모니터 화면을 확인해 주세요."
+    })
+
+
 @app.route("/")
+@login_required
 def index():
-    return render_template("index.html")
+    return render_template("index.html", current_user={"id": session["user_id"], "username": session["username"]})
 
 
-# 모든 저장된 계획 목록 가져오기 (검색, 필터링, 정렬 지원)
+# ==============================================================================
+# 계획(Plan) 관련 엔드포인트 (사용자별 격리)
+# ==============================================================================
+
 @app.route("/api/plans", methods=["GET"])
+@login_required
 def get_plans():
+    user_id = session["user_id"]
     query = request.args.get("q", "").strip()
     status_filter = request.args.get("status", "").strip()
     priority_filter = request.args.get("priority", "").strip()
@@ -248,6 +771,7 @@ def get_plans():
 
     conn = get_db()
 
+    # [격리] p.user_id = ? 필수 적용
     sql = """
         SELECT p.*,
                (SELECT COUNT(*) FROM plan_history h WHERE h.plan_id = p.id) AS history_count,
@@ -257,9 +781,9 @@ def get_plans():
                (SELECT COUNT(*) FROM plan_tasks t WHERE t.plan_id = p.id) AS task_count,
                (SELECT COUNT(*) FROM plan_tasks t WHERE t.plan_id = p.id AND t.is_completed = 1) AS completed_task_count
         FROM plans p
-        WHERE 1=1
+        WHERE p.user_id = ?
     """
-    params = []
+    params = [user_id]
 
     if query:
         sql += " AND (p.title LIKE ? OR p.tags LIKE ? OR p.current_success_criteria LIKE ?)"
@@ -313,7 +837,6 @@ def get_plans():
         d = dict(row)
         is_comp = (d.get("status") == "완료")
         p_end = d.get("current_end_date")
-        # [T06-C30] 완료되지 않았고 마감일이 서울 시간 기준 오늘보다 앞선 할 일만 지연으로 판정
         d["is_delayed"] = bool(not is_comp and p_end and p_end < today_str)
         plans.append(d)
 
@@ -325,24 +848,26 @@ def get_plans():
     })
 
 
-# 특정 계획 또는 최신 계획 가져오기
 @app.route("/api/plan", methods=["GET"])
+@login_required
 def get_plan():
+    user_id = session["user_id"]
     plan_id = request.args.get("id")
     conn = get_db()
 
     if plan_id:
         try:
-            plan = conn.execute("SELECT * FROM plans WHERE id = ?", (int(plan_id),)).fetchone()
+            plan = conn.execute("SELECT * FROM plans WHERE id = ? AND user_id = ?", (int(plan_id), user_id)).fetchone()
         except (ValueError, TypeError):
             plan = None
     else:
         plan = conn.execute("""
             SELECT *
             FROM plans
+            WHERE user_id = ?
             ORDER BY id DESC
             LIMIT 1
-        """).fetchone()
+        """, (user_id,)).fetchone()
 
     if plan is None:
         conn.close()
@@ -350,46 +875,19 @@ def get_plan():
             "exists": False
         })
 
-    plan_dict = dict(plan)
-
-    # 수정 이력(plan_history)도 함께 반환
-    hist_cursor = conn.execute("""
-        SELECT *
-        FROM plan_history
-        WHERE plan_id = ?
-        ORDER BY version DESC, id DESC
-    """, (plan_dict["id"],))
-    history = [dict(row) for row in hist_cursor.fetchall()]
-
-    # 실행 기록(execution_records)도 함께 반환
-    exec_cursor = conn.execute("""
-        SELECT *
-        FROM execution_records
-        WHERE plan_id = ?
-        ORDER BY id DESC
-    """, (plan_dict["id"],))
-    executions = [dict(row) for row in exec_cursor.fetchall()]
-
-    # 단일 완료 기록 조회
-    comp_row = conn.execute("SELECT completed_at FROM completion_records WHERE plan_id = ?", (plan_dict["id"],)).fetchone()
-    completed_at = comp_row["completed_at"] if comp_row else None
-
+    plan_data = dict(plan)
     conn.close()
 
     return jsonify({
         "exists": True,
-        "plan": plan_dict,
-        "history": history,
-        "executions": executions,
-        "execution_count": len(executions),
-        "total_actual_minutes": sum(e["actual_minutes"] for e in executions),
-        "completed_at": completed_at
+        "plan": plan_data
     })
 
 
-# 최초 계획 저장
 @app.route("/api/plan", methods=["POST"])
+@login_required
 def create_plan():
+    user_id = session["user_id"]
     data = request.get_json()
 
     title = data.get("title", "").strip()
@@ -403,613 +901,563 @@ def create_plan():
     except (ValueError, TypeError):
         expected_minutes = 0
 
-    # 입력 검증
     if not title:
-        return jsonify({
-            "success": False,
-            "message": "계획을 입력해주세요."
-        }), 400
-
+        return jsonify({"success": False, "message": "계획명을 입력해 주세요."}), 400
     if not start_date or not end_date:
-        return jsonify({
-            "success": False,
-            "message": "기간을 입력해주세요."
-        }), 400
-
+        return jsonify({"success": False, "message": "기간을 입력해 주세요."}), 400
     if start_date > end_date:
-        return jsonify({
-            "success": False,
-            "message": "시작일은 종료일보다 늦을 수 없습니다."
-        }), 400
-
+        return jsonify({"success": False, "message": "시작일이 종료일보다 늦을 수 없습니다."}), 400
     if not success_criteria:
-        return jsonify({
-            "success": False,
-            "message": "성공 기준을 입력해주세요."
-        }), 400
-
+        return jsonify({"success": False, "message": "성공 기준을 입력해 주세요."}), 400
     if expected_minutes <= 0:
-        return jsonify({
-            "success": False,
-            "message": "예상 시간은 1분 이상 입력해주세요."
-        }), 400
+        return jsonify({"success": False, "message": "예상 시간은 1분 이상 입력해 주세요."}), 400
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    tags = data.get("tags", "").strip()
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_db()
 
-    # 우선순위가 비어있거나 '보통'/'높음'/'낮음'인 경우 다음 순위로 자동 배정
-    if not priority or priority in ["높음", "보통", "낮음"]:
-        cnt_row = conn.execute("SELECT COUNT(*) AS cnt FROM plans").fetchone()
-        count = cnt_row["cnt"] if cnt_row else 0
-        priority = f"{count + 1}순위"
-
-    # 최초 계획과 현재 계획을 같은 값으로 저장
-    cursor = conn.execute("""
-        INSERT INTO plans (
-            title, 
-            tags,
-            original_title,
-
-            original_priority,
-            original_start_date,
-            original_end_date,
-            original_success_criteria,
-            original_expected_minutes,
-
-            current_priority,
-            current_start_date,
-            current_end_date,
-            current_success_criteria,
-            current_expected_minutes,
-
-            status,
-
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        title,
-        tags,
-        title,
-
-        priority,
-        start_date,
-        end_date,
-        success_criteria,
-        expected_minutes,
-
-        priority,
-        start_date,
-        end_date,
-        success_criteria,
-        expected_minutes,
-
-        "진행중",
-
-        now,
-        now
-    ))
-
-    conn.commit()
-
-    plan_id = cursor.lastrowid
-
-    conn.close()
-
-    return jsonify({
-        "success": True,
-        "message": "계획이 저장되었습니다.",
-        "plan_id": plan_id
-    })
-
-
-# 현재 계획 수정
-@app.route("/api/plan", methods=["PUT"])
-def update_plan():
-    data = request.get_json()
-
-    try:
-        plan_id = int(data.get("id"))
-    except (ValueError, TypeError):
-        return jsonify({
-            "success": False,
-            "message": "잘못된 계획입니다."
-        }), 400
-
-    title = data.get("title", "").strip()
-    priority = data.get("priority", "").strip()
-    start_date = data.get("start_date", "")
-    end_date = data.get("end_date", "")
-    success_criteria = data.get("success_criteria", "").strip()
-
-    try:
-        expected_minutes = int(data.get("expected_minutes", 0))
-    except (ValueError, TypeError):
-        expected_minutes = 0
-
-    if not title:
-        return jsonify({
-            "success": False,
-            "message": "계획을 입력해주세요."
-        }), 400
-
-    if not start_date or not end_date:
-        return jsonify({
-            "success": False,
-            "message": "기간을 입력해주세요."
-        }), 400
-
-    if start_date > end_date:
-        return jsonify({
-            "success": False,
-            "message": "시작일은 종료일보다 늦을 수 없습니다."
-        }), 400
-
-    if not success_criteria:
-        return jsonify({
-            "success": False,
-            "message": "성공 기준을 입력하세요."
-        }), 400
-
-    if expected_minutes <= 0:
-        return jsonify({
-            "success": False,
-            "message": "예상 시간은 1분 이상 입력해주세요."
-        }), 400
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    tags = data.get("tags", "").strip()
-
-    conn = get_db()
-
-    # 기존 계획 조회 (수정 전 상태)
-    existing = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
-    if not existing:
-        conn.close()
-        return jsonify({
-            "success": False,
-            "message": "계획을 찾을 수 없습니다."
-        }), 404
-
-    # 우선순위가 비어있거나 구버전 값인 경우 기존 우선순위 유지
-    if not priority or priority in ["높음", "보통", "낮음"]:
-        if existing["current_priority"]:
-            priority = existing["current_priority"]
-        else:
-            priority = "1순위"
-
-    # [T06-C08] 계획을 고쳐도 고치기 전 계획이 그대로 남아 있다.
-    # 수정 전 계획 상태를 별도 표(plan_history)에 분리 저장하고, 계획 ID는 유지
-    ver_cursor = conn.execute("SELECT COUNT(*) AS cnt FROM plan_history WHERE plan_id = ?", (plan_id,))
-    ver_count = ver_cursor.fetchone()["cnt"]
-    next_ver = ver_count + 1
-
-    existing_tags = existing["tags"] if "tags" in existing.keys() else ""
-
-    conn.execute("""
-        INSERT INTO plan_history (
-            plan_id,
-            version,
-            title,
-            tags,
-            priority,
-            start_date,
-            end_date,
-            success_criteria,
-            expected_minutes,
-            status,
-            modified_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        plan_id,
-        next_ver,
-        existing["title"],
-        existing_tags,
-        existing["current_priority"],
-        existing["current_start_date"],
-        existing["current_end_date"],
-        existing["current_success_criteria"],
-        existing["current_expected_minutes"],
-        existing["status"],
-        now
-    ))
-
-    result = conn.execute("""
-        UPDATE plans
-        SET
-            title = ?,
-            tags = ?,
-            current_priority = ?,
-            current_start_date = ?,
-            current_end_date = ?,
-            current_success_criteria = ?,
-            current_expected_minutes = ?,
-            updated_at = ?
-        WHERE id = ?
-    """, (
-        title,
-        tags,
-        priority,
-        start_date,
-        end_date,
-        success_criteria,
-        expected_minutes,
-        now,
-        plan_id
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({
-        "success": True,
-        "message": "계획이 수정되었습니다. 수정 전 계획은 이력 표에 보존됩니다."
-    })
-
-
-# 특정 계획의 수정 이력 목록 가져오기 (T06-C08)
-@app.route("/api/plan/<int:plan_id>/history", methods=["GET"])
-def get_plan_history(plan_id):
-    conn = get_db()
-    cursor = conn.execute("""
-        SELECT *
-        FROM plan_history
-        WHERE plan_id = ?
-        ORDER BY version DESC, id DESC
-    """, (plan_id,))
-    history = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-
-    return jsonify({
-        "success": True,
-        "plan_id": plan_id,
-        "history": history,
-        "count": len(history)
-    })
-
-
-# 특정 수정 이력으로 계획 복원하기
-@app.route("/api/plan/<int:plan_id>/history/<int:history_id>/restore", methods=["POST"])
-def restore_plan_history(plan_id, history_id):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn = get_db()
-
-    target_history = conn.execute(
-        "SELECT * FROM plan_history WHERE id = ? AND plan_id = ?",
-        (history_id, plan_id)
-    ).fetchone()
-
-    if not target_history:
-        conn.close()
-        return jsonify({"success": False, "message": "해당 수정 이력을 찾을 수 없습니다."}), 404
-
-    current = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
-    if not current:
-        conn.close()
-        return jsonify({"success": False, "message": "계획을 찾을 수 없습니다."}), 404
-
-    # 복원 전 현재 상태도 이력에 추가 보존
-    ver_cursor = conn.execute("SELECT COUNT(*) AS cnt FROM plan_history WHERE plan_id = ?", (plan_id,))
-    ver_count = ver_cursor.fetchone()["cnt"]
-    next_ver = ver_count + 1
-
-    current_tags = current["tags"] if "tags" in current.keys() else ""
-    target_tags = target_history["tags"] if "tags" in target_history.keys() else ""
-
-    conn.execute("""
-        INSERT INTO plan_history (
-            plan_id, version, title, tags, priority,
-            start_date, end_date, success_criteria,
-            expected_minutes, status, modified_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        plan_id, next_ver,
-        current["title"], current_tags, current["current_priority"],
-        current["current_start_date"], current["current_end_date"],
-        current["current_success_criteria"], current["current_expected_minutes"],
-        current["status"], now
-    ))
-
-    # 대상 이력 데이터로 plans 테이블 복원
-    conn.execute("""
-        UPDATE plans
-        SET
-            title = ?,
-            tags = ?,
-            current_priority = ?,
-            current_start_date = ?,
-            current_end_date = ?,
-            current_success_criteria = ?,
-            current_expected_minutes = ?,
-            updated_at = ?
-        WHERE id = ?
-    """, (
-        target_history["title"],
-        target_tags,
-        target_history["priority"],
-        target_history["start_date"],
-        target_history["end_date"],
-        target_history["success_criteria"],
-        target_history["expected_minutes"],
-        now,
-        plan_id
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({
-        "success": True,
-        "message": f"'{target_history['title']}'(v{target_history['version']}) 버전으로 계획이 복원되었습니다."
-    })
-
-
-# 계획 우선순위 일괄 변경 (드래그 앤 드롭 슬라이드 재정렬)
-@app.route("/api/plans/reorder", methods=["PUT"])
-def reorder_plans():
-    data = request.get_json()
-    order = data.get("order", [])
-
-    if not isinstance(order, list) or len(order) == 0:
-        return jsonify({
-            "success": False,
-            "message": "순서 데이터가 올바르지 않습니다."
-        }), 400
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn = get_db()
-
-    # original_priority는 건드리지 않고 current_priority만 1순위, 2순위...로 변경하여 T06-C08 준수
-    for rank, plan_id in enumerate(order, start=1):
-        priority_str = f"{rank}순위"
-        conn.execute("""
-            UPDATE plans
-            SET current_priority = ?, updated_at = ?
-            WHERE id = ?
-        """, (priority_str, now, int(plan_id)))
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({
-        "success": True,
-        "message": "우선순위가 성공적으로 변경되었습니다."
-    })
-
-
-# 계획 상태 변경 (진행중 <-> 완료)
-# 완료로 변경 시 우선순위 맨 아래로 이동
-# [요구사항 4 & 5] 완료 버튼을 2번 눌러도 완료 기록은 1번만 남고 돌아보기 완료 수도 1만 증가하도록 단일성 및 멱등성 보장
-@app.route("/api/plan/<int:plan_id>/status", methods=["PUT", "POST"])
-def update_plan_status(plan_id):
-    data = request.get_json(silent=True) or {}
-    new_status = data.get("status")
-
-    conn = get_db()
-    current = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
-    if not current:
-        conn.close()
-        return jsonify({"success": False, "message": "계획을 찾을 수 없습니다."}), 404
-
-    # 상태 지정이 없으면 토글
-    if not new_status:
-        new_status = "완료" if current["status"] != "완료" else "진행중"
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # [요구사항 4 & 5] 이미 완료된 상태에서 다시 '완료' 요청이 들어온 경우 (중복 클릭 방어)
-    if current["status"] == "완료" and new_status == "완료":
-        # completion_records에 이미 1건만 존재함을 보장하고 그대로 반환
-        conn.execute("""
-            INSERT OR IGNORE INTO completion_records (plan_id, completed_at)
-            VALUES (?, ?)
-        """, (plan_id, now))
-        conn.commit()
-        conn.close()
-        return jsonify({
-            "success": True,
-            "message": "이미 완료 처리된 계획입니다. 완료 기록은 1건으로 유지됩니다.",
-            "status": "완료",
-            "already_completed": True
-        })
-
-    if new_status == "완료":
-        # 완료 기록 단일 삽입 (UNIQUE 제약으로 1건만 보존)
-        conn.execute("""
-            INSERT OR IGNORE INTO completion_records (plan_id, completed_at)
-            VALUES (?, ?)
-        """, (plan_id, now))
-    else:
-        # 진행중으로 복귀 시 completion_records에서 삭제하여 정합성 유지
-        conn.execute("DELETE FROM completion_records WHERE plan_id = ?", (plan_id,))
-
-    # 전체 계획 ID를 현재 우선순위 순서대로 조회
-    cursor = conn.execute("""
-        SELECT id, status
+    # 사용자의 기존 계획들 우선순위 정렬 및 밀어내기
+    cur_p_rows = conn.execute("""
+        SELECT id, current_priority
         FROM plans
+        WHERE user_id = ?
         ORDER BY
             CASE
                 WHEN current_priority LIKE '%순위' THEN CAST(REPLACE(current_priority, '순위', '') AS INTEGER)
                 ELSE 999999
             END ASC,
-            id DESC
-    """)
-    all_rows = [dict(r) for r in cursor.fetchall()]
+            id ASC
+    """, (user_id,)).fetchall()
 
-    plan_ids = [r["id"] for r in all_rows]
-    if plan_id in plan_ids:
-        plan_ids.remove(plan_id)
+    target_num = None
+    if priority and priority.endswith("순위"):
+        try:
+            target_num = int(priority.replace("순위", ""))
+        except ValueError:
+            target_num = None
 
-    if new_status == "완료":
-        # 완료 상태로 변경되면 맨 아래로 이동
-        plan_ids.append(plan_id)
+    if target_num is not None:
+        final_priority = f"{target_num}순위"
+        for p_row in cur_p_rows:
+            p_curr = p_row["current_priority"]
+            if p_curr and p_curr.endswith("순위"):
+                try:
+                    c_num = int(p_curr.replace("순위", ""))
+                    if c_num >= target_num:
+                        new_p_str = f"{c_num + 1}순위"
+                        conn.execute("UPDATE plans SET current_priority = ? WHERE id = ? AND user_id = ?", (new_p_str, p_row["id"], user_id))
+                except ValueError:
+                    pass
     else:
-        # 다시 진행중으로 바뀌면, 완료된 계획들 바로 앞으로 복귀
-        completed_ids = [r["id"] for r in all_rows if r["id"] != plan_id and r["status"] == "완료"]
-        if completed_ids:
-            first_completed_idx = next((i for i, pid in enumerate(plan_ids) if pid in completed_ids), len(plan_ids))
-            plan_ids.insert(first_completed_idx, plan_id)
-        else:
-            plan_ids.append(plan_id)
+        max_num = 0
+        for p_row in cur_p_rows:
+            p_curr = p_row["current_priority"]
+            if p_curr and p_curr.endswith("순위"):
+                try:
+                    c_num = int(p_curr.replace("순위", ""))
+                    if c_num > max_num:
+                        max_num = c_num
+                except ValueError:
+                    pass
+        final_priority = f"{max_num + 1}순위"
 
-    # 모든 계획의 current_priority를 재할당 (1순위, 2순위, ...)
-    for rank, pid in enumerate(plan_ids, start=1):
-        if pid == plan_id:
+    cursor = conn.execute("""
+        INSERT INTO plans (
+            user_id,
+            title, original_title,
+            original_priority, original_start_date, original_end_date, original_success_criteria, original_expected_minutes,
+            current_priority, current_start_date, current_end_date, current_success_criteria, current_expected_minutes,
+            status, tags, created_at, updated_at
+        ) VALUES (
+            ?,
+            ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            '진행중', '', ?, ?
+        )
+    """, (
+        user_id,
+        title, title,
+        final_priority, start_date, end_date, success_criteria, expected_minutes,
+        final_priority, start_date, end_date, success_criteria, expected_minutes,
+        now_str, now_str
+    ))
+
+    new_id = cursor.lastrowid
+    conn.commit()
+
+    saved_plan = conn.execute("SELECT * FROM plans WHERE id = ? AND user_id = ?", (new_id, user_id)).fetchone()
+    conn.close()
+
+    return jsonify({
+        "success": True,
+        "message": "새 계획이 안전하게 등록되었습니다.",
+        "plan": dict(saved_plan)
+    }), 201
+
+
+@app.route("/api/plan", methods=["PUT"])
+@login_required
+def update_plan():
+    user_id = session["user_id"]
+    data = request.get_json()
+
+    try:
+        plan_id = int(data.get("id"))
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "message": "잘못된 계획 ID입니다."}), 400
+
+    title = data.get("title", "").strip()
+    priority = data.get("priority", "").strip()
+    start_date = data.get("start_date", "")
+    end_date = data.get("end_date", "")
+    success_criteria = data.get("success_criteria", "").strip()
+
+    try:
+        expected_minutes = int(data.get("expected_minutes", 0))
+    except (ValueError, TypeError):
+        expected_minutes = 0
+
+    if not title:
+        return jsonify({"success": False, "message": "계획명을 입력해 주세요."}), 400
+    if not start_date or not end_date:
+        return jsonify({"success": False, "message": "기간을 입력해 주세요."}), 400
+    if start_date > end_date:
+        return jsonify({"success": False, "message": "시작일이 종료일보다 늦을 수 없습니다."}), 400
+    if not success_criteria:
+        return jsonify({"success": False, "message": "성공 기준을 입력해 주세요."}), 400
+    if expected_minutes <= 0:
+        return jsonify({"success": False, "message": "예상 시간은 1분 이상 입력해 주세요."}), 400
+
+    conn = get_db()
+    current_plan = check_plan_ownership(conn, plan_id, user_id)
+    if current_plan is None:
+        conn.close()
+        return jsonify({"success": False, "message": "해당 계획을 수정할 권한이 없습니다."}), 403
+
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+
+    # 버전 산출 및 이전 스냅샷 history 테이블에 보존 (T06-C08)
+    last_hist = conn.execute("""
+        SELECT version FROM plan_history
+        WHERE plan_id = ?
+        ORDER BY version DESC LIMIT 1
+    """, (plan_id,)).fetchone()
+    next_ver = (last_hist["version"] + 1) if last_hist else 1
+
+    conn.execute("""
+        INSERT INTO plan_history (
+            plan_id, version, title, priority,
+            start_date, end_date, success_criteria,
+            expected_minutes, status, tags, modified_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        plan_id,
+        next_ver,
+        current_plan["title"],
+        current_plan["current_priority"],
+        current_plan["current_start_date"],
+        current_plan["current_end_date"],
+        current_plan["current_success_criteria"],
+        current_plan["current_expected_minutes"],
+        current_plan["status"],
+        current_plan["tags"],
+        current_plan["updated_at"]
+    ))
+
+    # 우선순위 재배치
+    cur_p_rows = conn.execute("""
+        SELECT id, current_priority
+        FROM plans
+        WHERE user_id = ? AND id != ?
+        ORDER BY
+            CASE
+                WHEN current_priority LIKE '%순위' THEN CAST(REPLACE(current_priority, '순위', '') AS INTEGER)
+                ELSE 999999
+            END ASC,
+            id ASC
+    """, (user_id, plan_id)).fetchall()
+
+    target_num = None
+    if priority and priority.endswith("순위"):
+        try:
+            target_num = int(priority.replace("순위", ""))
+        except ValueError:
+            target_num = None
+
+    if target_num is not None:
+        final_priority = f"{target_num}순위"
+        for p_row in cur_p_rows:
+            p_curr = p_row["current_priority"]
+            if p_curr and p_curr.endswith("순위"):
+                try:
+                    c_num = int(p_curr.replace("순위", ""))
+                    if c_num >= target_num:
+                        new_p_str = f"{c_num + 1}순위"
+                        conn.execute("UPDATE plans SET current_priority = ? WHERE id = ? AND user_id = ?", (new_p_str, p_row["id"], user_id))
+                except ValueError:
+                    pass
+    else:
+        final_priority = current_plan["current_priority"]
+
+    conn.execute("""
+        UPDATE plans
+        SET title = ?,
+            current_priority = ?,
+            current_start_date = ?,
+            current_end_date = ?,
+            current_success_criteria = ?,
+            current_expected_minutes = ?,
+            updated_at = ?
+        WHERE id = ? AND user_id = ?
+    """, (
+        title,
+        final_priority,
+        start_date,
+        end_date,
+        success_criteria,
+        expected_minutes,
+        now_str,
+        plan_id,
+        user_id
+    ))
+
+    conn.commit()
+    updated_plan = conn.execute("SELECT * FROM plans WHERE id = ? AND user_id = ?", (plan_id, user_id)).fetchone()
+    conn.close()
+
+    return jsonify({
+        "success": True,
+        "message": "계획이 안전하게 수정되었습니다. (이전 내용은 변경 이력에 보존됨)",
+        "plan": dict(updated_plan)
+    })
+
+
+@app.route("/api/plan/<int:plan_id>/history", methods=["GET"])
+@login_required
+def get_plan_history(plan_id):
+    user_id = session["user_id"]
+    conn = get_db()
+    if not check_plan_ownership(conn, plan_id, user_id):
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
+    history_cursor = conn.execute("""
+        SELECT *
+        FROM plan_history
+        WHERE plan_id = ?
+        ORDER BY version DESC, id DESC
+    """, (plan_id,))
+
+    history = [dict(row) for row in history_cursor.fetchall()]
+    conn.close()
+
+    return jsonify({
+        "history": history,
+        "count": len(history)
+    })
+
+
+@app.route("/api/plan/<int:plan_id>/history/<int:history_id>/restore", methods=["POST"])
+@login_required
+def restore_plan_history(plan_id, history_id):
+    user_id = session["user_id"]
+    conn = get_db()
+    current_plan = check_plan_ownership(conn, plan_id, user_id)
+    if current_plan is None:
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
+    hist_item = conn.execute("""
+        SELECT * FROM plan_history
+        WHERE id = ? AND plan_id = ?
+    """, (history_id, plan_id)).fetchone()
+
+    if hist_item is None:
+        conn.close()
+        return jsonify({"success": False, "message": "해당 이력 정보를 찾을 수 없습니다."}), 404
+
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+
+    last_ver_row = conn.execute("""
+        SELECT version FROM plan_history
+        WHERE plan_id = ?
+        ORDER BY version DESC LIMIT 1
+    """, (plan_id,)).fetchone()
+    next_ver = (last_ver_row["version"] + 1) if last_ver_row else 1
+
+    conn.execute("""
+        INSERT INTO plan_history (
+            plan_id, version, title, priority,
+            start_date, end_date, success_criteria,
+            expected_minutes, status, tags, modified_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        plan_id,
+        next_ver,
+        current_plan["title"],
+        current_plan["current_priority"],
+        current_plan["current_start_date"],
+        current_plan["current_end_date"],
+        current_plan["current_success_criteria"],
+        current_plan["current_expected_minutes"],
+        current_plan["status"],
+        current_plan["tags"],
+        current_plan["updated_at"]
+    ))
+
+    conn.execute("""
+        UPDATE plans
+        SET title = ?,
+            current_priority = ?,
+            current_start_date = ?,
+            current_end_date = ?,
+            current_success_criteria = ?,
+            current_expected_minutes = ?,
+            status = ?,
+            tags = ?,
+            updated_at = ?
+        WHERE id = ? AND user_id = ?
+    """, (
+        hist_item["title"],
+        hist_item["priority"],
+        hist_item["start_date"],
+        hist_item["end_date"],
+        hist_item["success_criteria"],
+        hist_item["expected_minutes"],
+        hist_item["status"],
+        hist_item["tags"],
+        now_str,
+        plan_id,
+        user_id
+    ))
+
+    conn.commit()
+    restored_plan = conn.execute("SELECT * FROM plans WHERE id = ? AND user_id = ?", (plan_id, user_id)).fetchone()
+    conn.close()
+
+    return jsonify({
+        "success": True,
+        "message": f"버전 {hist_item['version']} 상태로 계획이 안전하게 복원되었습니다.",
+        "plan": dict(restored_plan)
+    })
+
+
+@app.route("/api/plans/reorder", methods=["PUT"])
+@login_required
+def reorder_plans():
+    user_id = session["user_id"]
+    data = request.get_json()
+    orders = data.get("orders", [])
+
+    if not orders:
+        return jsonify({"success": False, "message": "정렬 정보가 없습니다."}), 400
+
+    conn = get_db()
+    for item in orders:
+        plan_id = item.get("id")
+        new_priority = item.get("priority")
+        if plan_id and new_priority:
             conn.execute("""
                 UPDATE plans
-                SET current_priority = ?, status = ?, updated_at = ?
-                WHERE id = ?
-            """, (f"{rank}순위", new_status, now, pid))
-        else:
-            conn.execute("""
-                UPDATE plans
-                SET current_priority = ?, updated_at = ?
-                WHERE id = ?
-            """, (f"{rank}순위", now, pid))
+                SET current_priority = ?
+                WHERE id = ? AND user_id = ?
+            """, (new_priority, plan_id, user_id))
 
     conn.commit()
     conn.close()
 
     return jsonify({
         "success": True,
-        "message": f"계획이 '{new_status}' 상태로 변경되었습니다.",
-        "status": new_status
+        "message": "우선순위 순서가 정상적으로 재정렬되었습니다."
     })
 
 
-# ==========================================================
-# 📌 계획에 딸린 세부 할 일 (Subtasks / Plan Tasks) CRUD API
-# ==========================================================
-
-# 1. 특정 계획의 딸린 할 일 목록 조회
-@app.route("/api/plan/<int:plan_id>/tasks", methods=["GET"])
-def get_plan_tasks(plan_id):
+@app.route("/api/plan/<int:plan_id>/status", methods=["PUT", "POST"])
+@login_required
+def update_plan_status(plan_id):
+    user_id = session["user_id"]
     conn = get_db()
-    cursor = conn.execute("""
+    plan = check_plan_ownership(conn, plan_id, user_id)
+    if not plan:
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
+    data = request.get_json() or {}
+    new_status = data.get("status")
+
+    if not new_status:
+        current_status = plan["status"]
+        new_status = "진행중" if current_status == "완료" else "완료"
+
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+
+    conn.execute("""
+        UPDATE plans
+        SET status = ?,
+            updated_at = ?
+        WHERE id = ? AND user_id = ?
+    """, (new_status, now_str, plan_id, user_id))
+
+    if new_status == "완료":
+        conn.execute("""
+            INSERT OR IGNORE INTO completion_records (plan_id, completed_at)
+            VALUES (?, ?)
+        """, (plan_id, now_str))
+    else:
+        conn.execute("DELETE FROM completion_records WHERE plan_id = ?", (plan_id,))
+
+    conn.commit()
+    updated_plan = conn.execute("SELECT * FROM plans WHERE id = ? AND user_id = ?", (plan_id, user_id)).fetchone()
+    conn.close()
+
+    return jsonify({
+        "success": True,
+        "message": f"계획 상태가 '{new_status}'(으)로 변경되었습니다.",
+        "plan": dict(updated_plan)
+    })
+
+
+@app.route("/api/plan/<int:plan_id>/tasks", methods=["GET"])
+@login_required
+def get_plan_tasks(plan_id):
+    user_id = session["user_id"]
+    conn = get_db()
+    if not check_plan_ownership(conn, plan_id, user_id):
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
+    tasks_cursor = conn.execute("""
         SELECT *
         FROM plan_tasks
         WHERE plan_id = ?
         ORDER BY order_num ASC, id ASC
     """, (plan_id,))
-    tasks = [dict(row) for row in cursor.fetchall()]
-    total_count = len(tasks)
-    completed_count = sum(1 for t in tasks if t.get("is_completed") == 1)
+
+    tasks = [dict(r) for r in tasks_cursor.fetchall()]
     conn.close()
 
     return jsonify({
-        "success": True,
         "tasks": tasks,
-        "total_count": total_count,
-        "completed_count": completed_count
+        "count": len(tasks)
     })
 
 
-# 2. 특정 계획에 새로운 딸린 할 일 추가
 @app.route("/api/plan/<int:plan_id>/tasks", methods=["POST"])
+@login_required
 def add_plan_task(plan_id):
-    data = request.get_json(silent=True) or {}
-    title = (data.get("title") or "").strip()
-    due_date = (data.get("due_date") or "").strip()
+    user_id = session["user_id"]
+    conn = get_db()
+    if not check_plan_ownership(conn, plan_id, user_id):
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
+    data = request.get_json() or {}
+    title = data.get("title", "").strip()
+    due_date = data.get("due_date", "").strip()
 
     if not title:
-        return jsonify({"success": False, "message": "할 일 내용을 입력해주세요."}), 400
-
-    conn = get_db()
-    plan = conn.execute("SELECT id FROM plans WHERE id = ?", (plan_id,)).fetchone()
-    if not plan:
         conn.close()
-        return jsonify({"success": False, "message": "계획을 찾을 수 없습니다."}), 404
+        return jsonify({"success": False, "message": "할 일 제목을 입력해 주세요."}), 400
 
-    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
-    max_order_row = conn.execute("SELECT MAX(order_num) AS max_o FROM plan_tasks WHERE plan_id = ?", (plan_id,)).fetchone()
-    next_order = (max_order_row["max_o"] or 0) + 1
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+
+    max_order_row = conn.execute("SELECT COALESCE(MAX(order_num), 0) AS mo FROM plan_tasks WHERE plan_id = ?", (plan_id,)).fetchone()
+    next_order = max_order_row["mo"] + 1
 
     cursor = conn.execute("""
         INSERT INTO plan_tasks (plan_id, title, is_completed, due_date, order_num, created_at, updated_at)
         VALUES (?, ?, 0, ?, ?, ?, ?)
     """, (plan_id, title, due_date, next_order, now_str, now_str))
-    task_id = cursor.lastrowid
 
-    # 부모 계획 updated_at 갱신
-    conn.execute("UPDATE plans SET updated_at = ? WHERE id = ?", (now_str, plan_id))
-
+    new_id = cursor.lastrowid
     conn.commit()
+
+    new_task = conn.execute("SELECT * FROM plan_tasks WHERE id = ?", (new_id,)).fetchone()
     conn.close()
 
     return jsonify({
         "success": True,
-        "message": "세부 할 일이 추가되었습니다.",
-        "task_id": task_id
-    })
+        "message": "할 일이 추가되었습니다.",
+        "task": dict(new_task)
+    }), 201
 
 
-# 3. 특정 딸린 할 일 수정 (내용, 완료 여부, 마감일 등)
 @app.route("/api/plan/<int:plan_id>/task/<int:task_id>", methods=["PUT"])
+@login_required
 def update_plan_task(plan_id, task_id):
-    data = request.get_json(silent=True) or {}
+    user_id = session["user_id"]
     conn = get_db()
+    if not check_plan_ownership(conn, plan_id, user_id):
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
     task = conn.execute("SELECT * FROM plan_tasks WHERE id = ? AND plan_id = ?", (task_id, plan_id)).fetchone()
     if not task:
         conn.close()
         return jsonify({"success": False, "message": "할 일을 찾을 수 없습니다."}), 404
 
-    title = data.get("title")
-    if title is not None:
-        title = str(title).strip()
-        if not title:
+    data = request.get_json() or {}
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+
+    updates = []
+    params = []
+
+    if "title" in data:
+        t = data["title"].strip()
+        if not t:
             conn.close()
-            return jsonify({"success": False, "message": "할 일 내용을 비워둘 수 없습니다."}), 400
-    else:
-        title = task["title"]
+            return jsonify({"success": False, "message": "제목을 입력해 주세요."}), 400
+        updates.append("title = ?")
+        params.append(t)
 
-    is_completed = data.get("is_completed")
-    if is_completed is not None:
-        is_completed = 1 if is_completed in [1, True, "1", "true"] else 0
-    else:
-        is_completed = task["is_completed"]
+    if "is_completed" in data:
+        updates.append("is_completed = ?")
+        params.append(1 if data["is_completed"] else 0)
 
-    due_date = data.get("due_date")
-    if due_date is not None:
-        due_date = str(due_date).strip()
-    else:
-        due_date = task["due_date"]
+    if "due_date" in data:
+        updates.append("due_date = ?")
+        params.append(data["due_date"].strip())
 
-    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute("""
-        UPDATE plan_tasks
-        SET title = ?, is_completed = ?, due_date = ?, updated_at = ?
-        WHERE id = ? AND plan_id = ?
-    """, (title, is_completed, due_date, now_str, task_id, plan_id))
+    if not updates:
+        conn.close()
+        return jsonify({"success": False, "message": "변경할 항목이 없습니다."}), 400
 
-    conn.execute("UPDATE plans SET updated_at = ? WHERE id = ?", (now_str, plan_id))
+    updates.append("updated_at = ?")
+    params.append(now_str)
+    params.extend([task_id, plan_id])
+
+    conn.execute(f"UPDATE plan_tasks SET {', '.join(updates)} WHERE id = ? AND plan_id = ?", params)
     conn.commit()
+
+    updated_task = conn.execute("SELECT * FROM plan_tasks WHERE id = ?", (task_id,)).fetchone()
     conn.close()
 
     return jsonify({
         "success": True,
-        "message": "할 일이 수정되었습니다."
+        "message": "할 일이 변경되었습니다.",
+        "task": dict(updated_task)
     })
 
 
-# 4. 특정 딸린 할 일 삭제
 @app.route("/api/plan/<int:plan_id>/task/<int:task_id>", methods=["DELETE"])
+@login_required
 def delete_plan_task(plan_id, task_id):
+    user_id = session["user_id"]
     conn = get_db()
-    result = conn.execute("DELETE FROM plan_tasks WHERE id = ? AND plan_id = ?", (task_id, plan_id))
-    deleted = result.rowcount > 0
-    if deleted:
-        now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute("UPDATE plans SET updated_at = ? WHERE id = ?", (now_str, plan_id))
+    if not check_plan_ownership(conn, plan_id, user_id):
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
+    conn.execute("DELETE FROM plan_tasks WHERE id = ? AND plan_id = ?", (task_id, plan_id))
     conn.commit()
     conn.close()
-
-    if not deleted:
-        return jsonify({"success": False, "message": "삭제할 할 일을 찾을 수 없습니다."}), 404
 
     return jsonify({
         "success": True,
@@ -1017,451 +1465,349 @@ def delete_plan_task(plan_id, task_id):
     })
 
 
-# 특정 계획의 모든 실행 기록 가져오기
+# ==============================================================================
+# 실행 기록(Do) 엔드포인트 (사용자별 격리)
+# ==============================================================================
+
 @app.route("/api/plan/<int:plan_id>/executions", methods=["GET"])
+@login_required
 def get_plan_executions(plan_id):
+    user_id = session["user_id"]
     conn = get_db()
+    if not check_plan_ownership(conn, plan_id, user_id):
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
     cursor = conn.execute("""
         SELECT *
         FROM execution_records
         WHERE plan_id = ?
-        ORDER BY id DESC
+        ORDER BY start_time ASC, id ASC
     """, (plan_id,))
-    executions = [dict(row) for row in cursor.fetchall()]
-    total_actual = sum(e["actual_minutes"] for e in executions)
+
+    records = [dict(row) for row in cursor.fetchall()]
     conn.close()
 
     return jsonify({
-        "success": True,
-        "plan_id": plan_id,
-        "executions": executions,
-        "count": len(executions),
-        "total_actual_minutes": total_actual
+        "executions": records,
+        "count": len(records)
     })
 
 
-# 실행 기록(Do) 저장
-# [요구사항 1, 2, 3] 시작/끝 시각, 실제 걸린 시간, 막혔던 이유 저장 및 이전 기록 누적 보존
 @app.route("/api/plan/<int:plan_id>/execution", methods=["POST"])
+@login_required
 def add_execution_record(plan_id):
-    data = request.get_json() or {}
+    user_id = session["user_id"]
+    conn = get_db()
+    plan = check_plan_ownership(conn, plan_id, user_id)
+    if not plan:
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
 
+    data = request.get_json() or {}
     start_time = data.get("start_time", "").strip()
     end_time = data.get("end_time", "").strip()
     blocker_reason = data.get("blocker_reason", "").strip()
     memo = data.get("memo", "").strip()
-    mark_completed = bool(data.get("mark_completed", False))
-    confirm_overlap = bool(data.get("confirm_overlap", False))
-
-    try:
-        actual_minutes = int(data.get("actual_minutes", 0))
-    except (ValueError, TypeError):
-        actual_minutes = 0
 
     if not start_time or not end_time:
-        return jsonify({
-            "success": False,
-            "message": "실행 시작 시각과 끝 시각을 모두 입력해주세요."
-        }), 400
-
-    if start_time > end_time:
-        return jsonify({
-            "success": False,
-            "message": "시작 시각은 끝 시각보다 늦을 수 없습니다."
-        }), 400
-
-    if actual_minutes <= 0:
-        return jsonify({
-            "success": False,
-            "message": "실제로 걸린 시간을 1분 이상 입력해주세요."
-        }), 400
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    conn = get_db()
-    plan = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
-    if not plan:
         conn.close()
-        return jsonify({
-            "success": False,
-            "message": "계획을 찾을 수 없습니다."
-        }), 404
+        return jsonify({"success": False, "message": "시작 시각과 종료 시각을 모두 입력해 주세요."}), 400
 
-    # 1. 완전 중복 저장 방지: 동일한 계획(plan_id)에 같은 시작 시각과 끝 시각을 가진 실행 기록이 이미 존재하는지 검사
-    existing_exec = conn.execute("""
+    try:
+        t_fmt = "%Y-%m-%d %H:%M" if len(start_time) == 16 else "%Y-%m-%d %H:%M:%S"
+        t_start = datetime.strptime(start_time, t_fmt)
+        t_end_fmt = "%Y-%m-%d %H:%M" if len(end_time) == 16 else "%Y-%m-%d %H:%M:%S"
+        t_end = datetime.strptime(end_time, t_end_fmt)
+    except ValueError:
+        conn.close()
+        return jsonify({"success": False, "message": "날짜 및 시간 형식이 올바르지 않습니다. (YYYY-MM-DD HH:MM)"}), 400
+
+    if t_start >= t_end:
+        conn.close()
+        return jsonify({"success": False, "message": "종료 시각은 시작 시각보다 뒤여야 합니다."}), 400
+
+    diff_seconds = (t_end - t_start).total_seconds()
+    actual_minutes = int(diff_seconds // 60)
+
+    # 멱등성 검증 (동일 구간 중복 방지)
+    existing = conn.execute("""
         SELECT id FROM execution_records
         WHERE plan_id = ? AND start_time = ? AND end_time = ?
     """, (plan_id, start_time, end_time)).fetchone()
 
-    if existing_exec:
+    if existing:
         conn.close()
         return jsonify({
             "success": False,
-            "duplicate": True,
-            "message": "동일한 시작 시각과 끝 시각을 가진 실행 기록이 이미 등록되어 있습니다. 중복으로 저장할 수 없습니다."
+            "message": "이미 동일한 시작 및 종료 시각으로 등록된 실행 기록이 존재합니다. (중복 방지)"
         }), 409
 
-    # 2. [옵션 B] 시간대 겹침 검사 (confirm_overlap이 False일 때 겹치는 내역 반환하여 확인 창 유도)
-    if not confirm_overlap:
-        overlap_rows = conn.execute("""
-            SELECT e.id, e.plan_id, e.start_time, e.end_time, e.actual_minutes, p.title AS plan_title
-            FROM execution_records e
-            JOIN plans p ON e.plan_id = p.id
-            WHERE e.start_time < ? AND e.end_time > ?
-            ORDER BY e.start_time ASC
-        """, (end_time, start_time)).fetchall()
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
 
-        if overlap_rows:
-            overlaps = [dict(r) for r in overlap_rows]
-            conn.close()
-            return jsonify({
-                "success": False,
-                "overlap": True,
-                "overlaps": overlaps,
-                "message": "입력하신 시간이 기존 실행 기록과 일부 겹칩니다."
-            }), 409
+    cursor = conn.execute("""
+        INSERT INTO execution_records (
+            plan_id, start_time, end_time, actual_minutes, blocker_reason, memo, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        plan_id, start_time, end_time, actual_minutes, blocker_reason, memo, now_str
+    ))
 
-    try:
-        # [요구사항 3] 실행 기록을 저장해도 이전의 기록이 사라지지 않게 항상 신규 INSERT로 누적 보존
-        cursor = conn.execute("""
-            INSERT INTO execution_records (
-                plan_id, start_time, end_time, actual_minutes, blocker_reason, memo, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (plan_id, start_time, end_time, actual_minutes, blocker_reason, memo, now))
-        execution_id = cursor.lastrowid
-    except sqlite3.IntegrityError:
-        conn.close()
-        return jsonify({
-            "success": False,
-            "duplicate": True,
-            "message": "동일한 시작 시각과 끝 시각을 가진 실행 기록이 이미 등록되어 있습니다. 중복으로 저장할 수 없습니다."
-        }), 409
+    new_id = cursor.lastrowid
 
-    # [요구사항 4 & 5] 실행과 함께 완료 처리 요청된 경우 단일성 보장
-    if mark_completed:
-        conn.execute("""
-            INSERT OR IGNORE INTO completion_records (plan_id, completed_at)
-            VALUES (?, ?)
-        """, (plan_id, now))
-
-        if plan["status"] != "완료":
-            # 완료 시 맨 아래 순위로 이동
-            cursor_p = conn.execute("""
-                SELECT id FROM plans WHERE id != ?
-                ORDER BY
-                    CASE
-                        WHEN current_priority LIKE '%순위' THEN CAST(REPLACE(current_priority, '순위', '') AS INTEGER)
-                        ELSE 999999
-                    END ASC
-            """, (plan_id,))
-            other_ids = [r["id"] for r in cursor_p.fetchall()]
-            other_ids.append(plan_id)
-
-            for rank, pid in enumerate(other_ids, start=1):
-                if pid == plan_id:
-                    conn.execute("""
-                        UPDATE plans
-                        SET current_priority = ?, status = '완료', updated_at = ?
-                        WHERE id = ?
-                    """, (f"{rank}순위", now, pid))
-                else:
-                    conn.execute("""
-                        UPDATE plans
-                        SET current_priority = ?, updated_at = ?
-                        WHERE id = ?
-                    """, (f"{rank}순위", now, pid))
-
+    # 계획 최종 업데이트 일시 갱신
+    conn.execute("UPDATE plans SET updated_at = ? WHERE id = ? AND user_id = ?", (now_str, plan_id, user_id))
     conn.commit()
+
+    saved_record = conn.execute("SELECT * FROM execution_records WHERE id = ?", (new_id,)).fetchone()
     conn.close()
 
     return jsonify({
         "success": True,
-        "message": "실행 기록이 안전하게 저장되었습니다. 이전 실행 기록도 모두 보존됩니다.",
-        "execution_id": execution_id
-    })
+        "message": "실행 기록이 누적 보존되었습니다.",
+        "execution": dict(saved_record)
+    }), 201
 
 
-# 실행 기록 개별 삭제
 @app.route("/api/execution/<int:execution_id>", methods=["DELETE"])
+@login_required
 def delete_execution_record(execution_id):
+    user_id = session["user_id"]
     conn = get_db()
+    # 소유권 확인
+    exec_row = conn.execute("""
+        SELECT e.id, p.user_id
+        FROM execution_records e
+        JOIN plans p ON e.plan_id = p.id
+        WHERE e.id = ?
+    """, (execution_id,)).fetchone()
+
+    if not exec_row or exec_row["user_id"] != user_id:
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
     conn.execute("DELETE FROM execution_records WHERE id = ?", (execution_id,))
     conn.commit()
     conn.close()
 
     return jsonify({
         "success": True,
-        "message": "해당 실행 기록이 삭제되었습니다."
+        "message": "실행 기록이 삭제되었습니다."
     })
 
 
-# 돌아보기 (See) 대시보드 통계 및 분석 데이터
-# [기간별 집계, 지표 확장(계획·완료·지연·막힘, 예상·실제 시간), 근거 추적 지원]
+# ==============================================================================
+# 돌아보기(See) 엔드포인트 (사용자별 격리)
+# ==============================================================================
+
 @app.route("/api/see", methods=["GET"])
+@login_required
 def get_see_data():
-    period = request.args.get("period", "all").strip().lower()
-    now = get_kst_now()
-    today_str = get_kst_today_str()
-
-    start_date = None
-    end_date = None
-    range_label = "전체 기간"
-
-    if period == "today":
-        start_date = today_str
-        end_date = today_str
-        range_label = f"오늘 ({today_str})"
-    elif period == "week":
-        monday = now.date() - timedelta(days=now.weekday())
-        sunday = monday + timedelta(days=6)
-        start_date = monday.strftime("%Y-%m-%d")
-        end_date = sunday.strftime("%Y-%m-%d")
-        range_label = f"이번 주 ({start_date} ~ {end_date})"
-    elif period == "month":
-        _, last_day = calendar.monthrange(now.year, now.month)
-        start_date = f"{now.year:04d}-{now.month:02d}-01"
-        end_date = f"{now.year:04d}-{now.month:02d}-{last_day:02d}"
-        range_label = f"이번 달 ({now.year}년 {now.month}월)"
-    else:
-        period = "all"
-        range_label = "전체 기간"
-
+    user_id = session["user_id"]
     conn = get_db()
 
-    # 모든 계획 및 연관 요약 정보 가져오기
-    summary_cursor = conn.execute("""
-        SELECT
-            p.id, p.title, p.current_priority, p.status,
-            p.current_start_date, p.current_end_date,
-            p.created_at, p.updated_at,
-            p.original_expected_minutes, p.current_expected_minutes,
-            c.completed_at,
-            (SELECT COUNT(*) FROM execution_records e WHERE e.plan_id = p.id) AS execution_count,
-            (SELECT COALESCE(SUM(actual_minutes), 0) FROM execution_records e WHERE e.plan_id = p.id) AS actual_total_minutes,
-            (SELECT COUNT(*) FROM execution_records e WHERE e.plan_id = p.id AND e.blocker_reason IS NOT NULL AND TRIM(e.blocker_reason) != '') AS blocker_count
-        FROM plans p
-        LEFT JOIN completion_records c ON p.id = c.plan_id
-        ORDER BY
-            CASE WHEN p.status = '완료' THEN 1 ELSE 0 END ASC,
-            CASE
-                WHEN p.current_priority LIKE '%순위' THEN CAST(REPLACE(p.current_priority, '순위', '') AS INTEGER)
-                ELSE 999999
-            END ASC,
-            p.id DESC
-    """)
-    all_plans = [dict(r) for r in summary_cursor.fetchall()]
+    # 현재 로그인된 사용자의 계획만 조회
+    plans_cursor = conn.execute("SELECT * FROM plans WHERE user_id = ? ORDER BY id ASC", (user_id,))
+    plans = [dict(row) for row in plans_cursor.fetchall()]
 
-    # 기간 필터링 적용
-    filtered_plans = []
-    for p in all_plans:
-        if period == "all":
-            filtered_plans.append(p)
-        else:
-            p_start = p["current_start_date"]
-            p_end = p["current_end_date"]
-            p_created = (p["created_at"] or "")[:10]
-            p_comp = (p["completed_at"] or "")[:10]
+    # 현재 사용자의 계획에 종속된 실행 기록만 조회
+    records_cursor = conn.execute("""
+        SELECT e.*, p.title AS plan_title
+        FROM execution_records e
+        JOIN plans p ON e.plan_id = p.id
+        WHERE p.user_id = ?
+        ORDER BY e.start_time ASC, e.id ASC
+    """, (user_id,))
+    execution_records = [dict(row) for row in records_cursor.fetchall()]
 
-            is_in_period = False
-            if p_start and p_end and (p_start <= end_date and p_end >= start_date):
-                is_in_period = True
-            elif p_created and (start_date <= p_created <= end_date):
-                is_in_period = True
-            elif p_comp and (start_date <= p_comp <= end_date):
-                is_in_period = True
+    # 현재 사용자의 next_actions만 조회
+    next_actions_cursor = conn.execute("""
+        SELECT * FROM next_actions
+        WHERE user_id = ?
+        ORDER BY id DESC
+    """, (user_id,))
+    next_actions = [dict(row) for row in next_actions_cursor.fetchall()]
 
-            if is_in_period:
-                filtered_plans.append(p)
+    today_str = get_kst_today_str()
 
-    # 지표 산출
-    total_plans = len(filtered_plans)
+    total_plans = len(plans)
     completed_plans = 0
     delayed_plans = 0
     blocked_plans = 0
-    ongoing_plans = 0
 
     total_expected_minutes = 0
     total_actual_minutes = 0
 
-    delayed_plan_ids = []
-    completed_plan_ids = []
-    ongoing_plan_ids = []
-    blocked_plan_ids = []
+    blocked_plan_ids = set()
+    for rec in execution_records:
+        total_actual_minutes += rec.get("actual_minutes", 0)
+        reason = rec.get("blocker_reason", "").strip()
+        if reason:
+            blocked_plan_ids.add(rec["plan_id"])
 
-    for p in filtered_plans:
-        p_id = p["id"]
-        is_comp = (p["status"] == "완료")
-        p_end = p["current_end_date"]
-        p_comp = (p["completed_at"] or "")[:10]
-        has_blocker = (p["blocker_count"] > 0)
+    blocked_plans = len(blocked_plan_ids)
 
-        # [T06-C30] 지연 판정: 완료되지 않았고 마감일이 서울 시간 기준 오늘보다 앞선 할 일 (완료한 할 일은 지연으로 두 번 세지 않음)
-        is_delayed = bool(not is_comp and p_end and p_end < today_str)
+    plan_stats = []
+    for p in plans:
+        pid = p["id"]
+        exp_min = p["current_expected_minutes"]
+        total_expected_minutes += exp_min
 
-        p["is_delayed"] = is_delayed
-        p["has_blocker"] = has_blocker
+        p_execs = [r for r in execution_records if r["plan_id"] == pid]
+        act_min = sum(r["actual_minutes"] for r in p_execs)
 
-        if is_comp:
+        is_completed = (p["status"] == "완료")
+        if is_completed:
             completed_plans += 1
-            completed_plan_ids.append(p_id)
-        else:
-            ongoing_plans += 1
-            ongoing_plan_ids.append(p_id)
 
+        end_date = p["current_end_date"]
+        is_delayed = bool(not is_completed and end_date and end_date < today_str)
         if is_delayed:
             delayed_plans += 1
-            delayed_plan_ids.append(p_id)
 
-        if has_blocker:
-            blocked_plans += 1
-            blocked_plan_ids.append(p_id)
+        diff_min = act_min - exp_min
+        plan_stats.append({
+            "plan_id": pid,
+            "title": p["title"],
+            "priority": p["current_priority"],
+            "status": p["status"],
+            "is_delayed": is_delayed,
+            "expected_minutes": exp_min,
+            "actual_minutes": act_min,
+            "diff_minutes": diff_min,
+            "execution_count": len(p_execs)
+        })
 
-        total_expected_minutes += int(p["current_expected_minutes"] or 0)
-        total_actual_minutes += int(p["actual_total_minutes"] or 0)
-
-    completion_rate = round((completed_plans / total_plans * 100), 1) if total_plans > 0 else 0
-
-    # 막혔던 이유 모아보기
-    plan_id_set = {p["id"] for p in filtered_plans}
-    blockers_cursor = conn.execute("""
-        SELECT e.id, e.plan_id, e.blocker_reason, e.actual_minutes, e.created_at, p.title AS plan_title
-        FROM execution_records e
-        JOIN plans p ON e.plan_id = p.id
-        WHERE e.blocker_reason IS NOT NULL AND TRIM(e.blocker_reason) != ''
-        ORDER BY e.id DESC
-    """)
-    all_blockers = [dict(r) for r in blockers_cursor.fetchall()]
-    if period == "all":
-        blockers = all_blockers
-    else:
-        blockers = [b for b in all_blockers if b["plan_id"] in plan_id_set or (start_date <= (b["created_at"] or "")[:10] <= end_date)]
-
-    # 최근 다음 계획으로 넘긴 한 줄 목록
-    recent_actions = []
-    try:
-        actions_cursor = conn.execute("""
-            SELECT * FROM next_actions
-            ORDER BY id DESC
-            LIMIT 5
-        """)
-        recent_actions = [dict(r) for r in actions_cursor.fetchall()]
-    except Exception:
-        pass
+    time_diff_minutes = total_actual_minutes - total_expected_minutes
+    completion_rate = round((completed_plans / total_plans * 100), 1) if total_plans > 0 else 0.0
 
     conn.close()
 
     return jsonify({
-        "success": True,
-        "period": period,
-        "range_label": range_label,
-        "start_date": start_date,
-        "end_date": end_date,
-        "total_plans": total_plans,
-        "completed_count": completed_plans,
-        "delayed_count": delayed_plans,
-        "blocked_count": blocked_plans,
-        "ongoing_count": ongoing_plans,
-        "completion_rate": completion_rate,
-        "total_expected_minutes": total_expected_minutes,
-        "total_actual_minutes": total_actual_minutes,
-        "time_difference": total_actual_minutes - total_expected_minutes,
-        "total_executions": sum(p["execution_count"] for p in filtered_plans),
-        "delayed_plan_ids": delayed_plan_ids,
-        "completed_plan_ids": completed_plan_ids,
-        "ongoing_plan_ids": ongoing_plan_ids,
-        "blocked_plan_ids": blocked_plan_ids,
-        "blockers": blockers,
-        "plan_do_summaries": filtered_plans,
-        "recent_actions": recent_actions
+        "summary": {
+            "total_plans": total_plans,
+            "completed_plans": completed_plans,
+            "delayed_plans": delayed_plans,
+            "blocked_plans": blocked_plans,
+            "completion_rate": completion_rate,
+            "total_expected_minutes": total_expected_minutes,
+            "total_actual_minutes": total_actual_minutes,
+            "time_diff_minutes": time_diff_minutes
+        },
+        "plan_stats": plan_stats,
+        "next_actions": next_actions
     })
 
 
-# 돌아보기에서 다음 계획으로 넘길 한 줄 저장
 @app.route("/api/see/next-action", methods=["POST"])
+@login_required
 def save_next_action():
+    user_id = session["user_id"]
     data = request.get_json() or {}
     action_text = data.get("action_text", "").strip()
     source_type = data.get("source_type", "custom").strip()
     source_plan_id = data.get("source_plan_id")
 
     if not action_text:
-        return jsonify({"success": False, "message": "고칠 점(개선할 내용)을 입력해주세요."}), 400
+        return jsonify({"success": False, "message": "고칠 점(Action Item) 내용을 입력해 주세요."}), 400
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+
     conn = get_db()
     cursor = conn.execute("""
-        INSERT INTO next_actions (action_text, source_type, source_plan_id, created_at, applied_at)
+        INSERT INTO next_actions (user_id, action_text, source_type, source_plan_id, created_at)
         VALUES (?, ?, ?, ?, ?)
-    """, (action_text, source_type, source_plan_id, now, now))
-    action_id = cursor.lastrowid
+    """, (user_id, action_text, source_type, source_plan_id, now_str))
+
+    new_id = cursor.lastrowid
     conn.commit()
+
+    saved_row = conn.execute("SELECT * FROM next_actions WHERE id = ? AND user_id = ?", (new_id, user_id)).fetchone()
     conn.close()
 
     return jsonify({
         "success": True,
-        "message": "고칠 점이 다음 계획으로 성공적으로 전달되었습니다.",
-        "action_id": action_id,
-        "action_text": action_text
-    })
+        "message": "고칠 점이 안전하게 저장되었습니다.",
+        "next_action": dict(saved_row)
+    }), 201
 
 
-# 돌아보기 다음 계획 액션 아이템 목록 조회
 @app.route("/api/see/next-actions", methods=["GET"])
+@login_required
 def get_next_actions():
+    user_id = session["user_id"]
     conn = get_db()
-    cursor = conn.execute("SELECT * FROM next_actions ORDER BY id DESC LIMIT 10")
-    rows = [dict(r) for r in cursor.fetchall()]
+    cursor = conn.execute("""
+        SELECT * FROM next_actions
+        WHERE user_id = ?
+        ORDER BY id DESC
+    """, (user_id,))
+    actions = [dict(row) for row in cursor.fetchall()]
     conn.close()
-    return jsonify({"success": True, "actions": rows})
-
-
-# 계획 삭제 (해당 계획의 수정 이력, 실행 기록, 완료 기록, 세부 할 일도 함께 삭제)
-@app.route("/api/plan/<int:plan_id>", methods=["DELETE"])
-def delete_plan(plan_id):
-    conn = get_db()
-    conn.execute("DELETE FROM plan_history WHERE plan_id = ?", (plan_id,))
-    conn.execute("DELETE FROM execution_records WHERE plan_id = ?", (plan_id,))
-    conn.execute("DELETE FROM completion_records WHERE plan_id = ?", (plan_id,))
-    conn.execute("DELETE FROM plan_tasks WHERE plan_id = ?", (plan_id,))
-    result = conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
-    conn.commit()
-    deleted = result.rowcount > 0
-    conn.close()
-
-    if not deleted:
-        return jsonify({
-            "success": False,
-            "message": "계획을 찾을 수 없습니다."
-        }), 404
 
     return jsonify({
-        "success": True,
-        "message": "계획과 세부 할 일, 수정 이력, 실행 및 완료 기록이 모두 삭제되었습니다."
+        "next_actions": actions,
+        "count": len(actions)
     })
 
 
-# 전체 데이터 파일 하나로 내보내기 (JSON Export / 백업)
-@app.route("/api/export", methods=["GET"])
-def export_all_data():
+@app.route("/api/plan/<int:plan_id>", methods=["DELETE"])
+@login_required
+def delete_plan(plan_id):
+    user_id = session["user_id"]
     conn = get_db()
-    
-    plans_cursor = conn.execute("SELECT * FROM plans ORDER BY id ASC")
+    if not check_plan_ownership(conn, plan_id, user_id):
+        conn.close()
+        return jsonify({"success": False, "message": "권한이 없습니다."}), 403
+
+    conn.execute("DELETE FROM plans WHERE id = ? AND user_id = ?", (plan_id, user_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "success": True,
+        "message": "계획이 삭제되었습니다."
+    })
+
+
+# ==============================================================================
+# 백업 및 내보내기 엔드포인트 (사용자별 격리)
+# ==============================================================================
+
+@app.route("/api/export", methods=["GET"])
+@login_required
+def export_all_data():
+    user_id = session["user_id"]
+    username = session["username"]
+    conn = get_db()
+
+    plans_cursor = conn.execute("SELECT * FROM plans WHERE user_id = ? ORDER BY id ASC", (user_id,))
     plans = [dict(r) for r in plans_cursor.fetchall()]
 
-    hist_cursor = conn.execute("SELECT * FROM plan_history ORDER BY id ASC")
-    history = [dict(r) for r in hist_cursor.fetchall()]
+    plan_ids = [p["id"] for p in plans]
+    if plan_ids:
+        placeholders = ",".join("?" * len(plan_ids))
+        history_cursor = conn.execute(f"SELECT * FROM plan_history WHERE plan_id IN ({placeholders}) ORDER BY id ASC", plan_ids)
+        history = [dict(r) for r in history_cursor.fetchall()]
 
-    exec_cursor = conn.execute("SELECT * FROM execution_records ORDER BY id ASC")
-    executions = [dict(r) for r in exec_cursor.fetchall()]
+        exec_cursor = conn.execute(f"SELECT * FROM execution_records WHERE plan_id IN ({placeholders}) ORDER BY id ASC", plan_ids)
+        executions = [dict(r) for r in exec_cursor.fetchall()]
 
-    comp_cursor = conn.execute("SELECT * FROM completion_records ORDER BY id ASC")
-    completions = [dict(r) for r in comp_cursor.fetchall()]
+        comp_cursor = conn.execute(f"SELECT * FROM completion_records WHERE plan_id IN ({placeholders}) ORDER BY id ASC", plan_ids)
+        completions = [dict(r) for r in comp_cursor.fetchall()]
 
-    next_cursor = conn.execute("SELECT * FROM next_actions ORDER BY id ASC")
-    next_actions = [dict(r) for r in next_cursor.fetchall()]
+        tasks_cursor = conn.execute(f"SELECT * FROM plan_tasks WHERE plan_id IN ({placeholders}) ORDER BY id ASC", plan_ids)
+        tasks = [dict(r) for r in tasks_cursor.fetchall()]
+    else:
+        history = []
+        executions = []
+        completions = []
+        tasks = []
 
-    tasks_cursor = conn.execute("SELECT * FROM plan_tasks ORDER BY id ASC")
-    tasks = [dict(r) for r in tasks_cursor.fetchall()]
+    next_actions_cursor = conn.execute("SELECT * FROM next_actions WHERE user_id = ? ORDER BY id ASC", (user_id,))
+    next_actions = [dict(r) for r in next_actions_cursor.fetchall()]
 
     conn.close()
 
@@ -1471,8 +1817,8 @@ def export_all_data():
     export_payload = {
         "metadata": {
             "system": "Plan-Do-See (PDS) Personal Task System",
-            "version": "2.0.0",
-            "schema_contract": "contracts/pds-schema-v2.json",
+            "version": "2.0.0 (Assignment 7 - Auth & Isolation)",
+            "user": username,
             "exported_at": now_kst.strftime("%Y-%m-%d %H:%M:%S"),
             "timezone": "Asia/Seoul (KST, UTC+9)",
             "total_plans": len(plans),
@@ -1480,8 +1826,7 @@ def export_all_data():
             "total_history": len(history),
             "total_executions": len(executions),
             "total_completions": len(completions),
-            "total_next_actions": len(next_actions),
-            "notice": "지금은 로그인이 없어 링크를 아는 사람은 누구나 볼 수 있습니다. 남이 봐도 괜찮은 내용만 넣으세요."
+            "total_next_actions": len(next_actions)
         },
         "plans": plans,
         "plan_tasks": tasks,
@@ -1492,7 +1837,7 @@ def export_all_data():
     }
 
     json_str = json.dumps(export_payload, ensure_ascii=False, indent=2)
-    filename = f"pds_backup_{timestamp_str}.json"
+    filename = f"pds_backup_{username}_{timestamp_str}.json"
 
     response = Response(json_str, mimetype="application/json; charset=utf-8")
     response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
@@ -1503,9 +1848,10 @@ def export_all_data():
 if __name__ == "__main__":
     init_db()
 
-    print("=" * 50)
-    print("Plan → Do → See 시작")
-    print("http://127.0.0.1:5000")
-    print("=" * 50)
+    print("=" * 60)
+    print("플랜두씨 다이어리 2 (Plan-Do-See) - 인증 & 격리 서버 시작")
+    print("기본 관리자 계정 (과제 6 샘플 데이터 연동): admin / admin1234!")
+    print("접속 주소: http://127.0.0.1:5000")
+    print("=" * 60)
 
-    app.run(debug=True)
+    app.run(debug=True, port=5000)

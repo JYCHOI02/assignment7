@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>로그인 — Plan → Do → See</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .auth-container {
+            max-width: 440px;
+            margin: 60px auto;
+            padding: 0 16px;
+        }
+        .auth-card {
+            background: #fff;
+            border: 1px solid #dcd8c8;
+            border-radius: 12px;
+            padding: 32px 28px;
+            box-shadow: 0 8px 24px rgba(43, 42, 40, 0.08);
+        }
+        .auth-header {
+            text-align: center;
+            margin-bottom: 24px;
+        }
+        .auth-badge {
+            display: inline-block;
+            background: #6b7fa3;
+            color: #fff;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: 20px;
+            letter-spacing: 0.5px;
+            margin-bottom: 10px;
+        }
+        .auth-title {
+            font-family: 'Gowun Batang', serif;
+            font-size: 26px;
+            font-weight: 700;
+            color: #2b2a28;
+            margin: 0 0 8px 0;
+        }
+        .auth-desc {
+            font-size: 13px;
+            color: #63604f;
+            line-height: 1.5;
+            margin: 0;
+        }
+        .auth-tabs {
+            display: flex;
+            background: #f5f6ec;
+            border-radius: 8px;
+            padding: 4px;
+            margin-bottom: 22px;
+            border: 1px solid rgba(43, 42, 40, 0.1);
+        }
+        .auth-tab-btn {
+            flex: 1;
+            padding: 10px;
+            text-align: center;
+            border: none;
+            background: transparent;
+            font-family: 'Noto Sans KR', sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            color: #63604f;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .auth-tab-btn.active {
+            background: #fff;
+            color: #2b2a28;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+        }
+        .auth-form {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            text-align: left;
+        }
+        .form-group label {
+            font-size: 13px;
+            font-weight: 600;
+            color: #2b2a28;
+        }
+        .form-group input {
+            padding: 10px 12px;
+            border: 1px solid #dcd8c8;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 14px;
+            background: #fafaf7;
+            transition: border-color 0.2s;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: #6b7fa3;
+            background: #fff;
+            box-shadow: 0 0 0 2px rgba(107, 127, 163, 0.15);
+        }
+        .auth-submit-btn {
+            padding: 12px;
+            background: #6b7fa3;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 15px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-top: 6px;
+        }
+        .auth-submit-btn:hover {
+            background: #546685;
+        }
+        .auth-error-box {
+            display: none;
+            background: #fdf2f2;
+            border: 1px solid #f8b4b4;
+            color: #9b1c1c;
+            padding: 10px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            line-height: 1.4;
+            margin-bottom: 16px;
+        }
+        .auth-success-box {
+            display: none;
+            background: #edf7ed;
+            border: 1px solid #b7eb8f;
+            color: #2e543c;
+            padding: 10px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            line-height: 1.4;
+            margin-bottom: 16px;
+        }
+        .auth-footer {
+            margin-top: 24px;
+            padding-top: 16px;
+            border-top: 1px solid #eee;
+            text-align: center;
+            font-size: 12px;
+            color: #888;
+        }
+        .sample-account-box {
+            background: #f5f6ec;
+            border: 1px dashed #dcd8c8;
+            border-radius: 6px;
+            padding: 10px 12px;
+            font-size: 12px;
+            color: #63604f;
+            margin-top: 14px;
+            line-height: 1.5;
+        }
+        .sample-account-box strong {
+            color: #c1512e;
+        }
+    </style>
+<script>
+    // WebAuthn W3C 표준 규격: IP 주소(127.0.0.1)는 유효한 도메인이 아니므로 localhost로 자동 전환
+    if (window.location.hostname === '127.0.0.1') {
+        window.location.href = window.location.href.replace('127.0.0.1', 'localhost');
+    }
+</script>
+</head>
+<body>
+
+<div class="auth-container">
+    <div class="auth-card">
+        <div class="auth-header">
+            <div class="auth-badge">PLAN → DO → SEE</div>
+            <h1 class="auth-title">플랜두씨 다이어리</h1>
+            <p class="auth-desc">안전한 개인 보관함에 오신 것을 환영합니다.<br>로그인하여 나만의 계획과 실행 기록을 관리하세요.</p>
+        </div>
+
+        <!-- 탭 전환: 로그인 / 회원가입 -->
+                        <!-- 📱 [QR Remote Approval] 스마트폰 지문인증으로 컴퓨터 자동 로그인 박스 -->
+        <div style="background: #f0f7f2; border: 1.5px solid #4c7a5e; border-radius: 12px; padding: 16px; margin-bottom: 20px; text-align: center; box-shadow: 0 4px 12px rgba(46,84,60,0.08);">
+            <div style="font-size: 14px; font-weight: 700; color: #2e543c; margin-bottom: 4px; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                <span>📱</span>
+                <span>스마트폰 지문인증으로 컴퓨터 로그인</span>
+            </div>
+            <div style="font-size: 12px; color: #555; margin-bottom: 10px;">
+                휴대폰 카메라로 아래 QR을 비추고 <b>지문 인증</b>을 누르면<br>
+                컴퓨터 화면이 <b>비밀번호 없이 자동으로 스르륵 로그인</b>됩니다!
+            </div>
+            
+            <div id="qrLoading" style="padding: 30px 0; color: #666; font-size: 13px;">
+                ⌛ 보안 QR 생성 중...
+            </div>
+            
+            <div id="qrImageWrap" style="display: none;">
+                <img id="qrImg" src="" alt="로그인 QR 코드" style="width: 150px; height: 150px; border-radius: 8px; border: 1px solid #dcd8c8; margin: 0 auto 8px; display: block; background: #fff; padding: 6px;">
+                <div id="qrStatusText" style="font-size: 12px; font-weight: 600; color: #2e543c;">
+                    📲 스마트폰에서 승인 대기 중...
+                </div>
+            </div>
+        </div>
+<div class="auth-tabs" role="tablist">
+            <button type="button" class="auth-tab-btn active" id="tabLogin" onclick="switchTab('login')">로그인</button>
+            <button type="button" class="auth-tab-btn" id="tabRegister" onclick="switchTab('register')">회원가입</button>
+        </div>
+
+        <!-- 알림 메시지 상자 -->
+        <div id="authErrorMsg" class="auth-error-box" role="alert"></div>
+        <div id="authSuccessMsg" class="auth-success-box" role="status"></div>
+
+        <!-- 로그인 폼 (T07-C95, T07-C99) -->
+        <form id="loginForm" class="auth-form" onsubmit="handleLoginSubmit(event)">
+            <div class="form-group">
+                <label for="loginUsername">아이디</label>
+                <input type="text" id="loginUsername" required placeholder="아이디 입력" autocomplete="username" autofocus>
+            </div>
+            <div class="form-group">
+                <label for="loginPassword">비밀번호</label>
+                <!-- 마스킹 필수 (type="password") -->
+                <input type="password" id="loginPassword" required placeholder="비밀번호 입력" autocomplete="current-password">
+            </div>
+                        <button type="submit" class="auth-submit-btn" id="loginSubmitBtn">로그인</button>
+
+            <!-- 🔑 [Passkey] 스마트폰 & 생체인증 원클릭 로그인 버튼 -->
+            <div style="position: relative; text-align: center; margin: 14px 0 6px;">
+                <div style="border-top: 1px solid #e0ded0; position: absolute; width: 100%; top: 50%;"></div>
+                <span style="background: #fff; padding: 0 10px; position: relative; font-size: 12px; color: #888;">또는 간편인증</span>
+            </div>
+            <button type="button" class="auth-submit-btn" id="passkeyLoginBtn" onclick="handlePasskeyLogin()" style="background: #2e543c; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                <span>🔑</span>
+                <span>스마트폰 / 생체인증 (Passkey) 로그인</span>
+            </button>
+
+            <!-- 샘플 계정 안내 (과제 6 마이그레이션 계정) -->
+            <div class="sample-account-box">
+                💡 <strong>과제 6 기존 샘플 데이터 계정</strong><br>
+                아이디: <code>admin</code> / 비밀번호: <code>admin1234!</code>
+            </div>
+        </form>
+
+        <!-- 회원가입 폼 (T07-C94, T07-C98) -->
+        <form id="registerForm" class="auth-form" style="display: none;" onsubmit="handleRegisterSubmit(event)">
+            <div class="form-group">
+                <label for="regUsername">신규 아이디</label>
+                <input type="text" id="regUsername" required placeholder="사용할 아이디 (2자 이상)" autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label for="regPassword">비밀번호</label>
+                <!-- 마스킹 필수 (type="password") -->
+                <input type="password" id="regPassword" required placeholder="비밀번호 (4자 이상)" autocomplete="new-password">
+            </div>
+            <div class="form-group">
+                <label for="regPasswordConfirm">비밀번호 확인</label>
+                <input type="password" id="regPasswordConfirm" required placeholder="비밀번호 재입력" autocomplete="new-password">
+            </div>
+            <button type="submit" class="auth-submit-btn" style="background: #4c7a5e;" id="regSubmitBtn">가입하기</button>
+        </form>
+
+        <div class="auth-footer">
+            🔒 본 서비스는 개인별 데이터 완전 격리 및 암호화 처리를 지원합니다.
+        </div>
+    </div>
+</div>
+
+<script>
+    
+    // Base64URL <-> ArrayBuffer 유틸리티 함수
+    function b64urlToBuffer(b64url) {
+        const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+        const bin = atob(b64 + pad);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes.buffer;
+    }
+
+    function bufferToB64url(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let bin = '';
+        for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    // [Passkey / WebAuthn] 스마트폰 & 생체인증 1초 로그인
+    async function handlePasskeyLogin() {
+        clearMessages();
+        if (!window.PublicKeyCredential) {
+            showError('현재 브라우저 또는 기기가 패스키(생체인증)를 지원하지 않습니다.');
+            return;
+        }
+
+        const username = document.getElementById('loginUsername').value.trim();
+        const passkeyBtn = document.getElementById('passkeyLoginBtn');
+        const origText = passkeyBtn.innerHTML;
+        passkeyBtn.disabled = true;
+        passkeyBtn.innerHTML = '⌛ 스마트폰 / 생체인증 대기 중...';
+
+        try {
+            // 1. 서버에 로그인 챌린지 요청
+            const optRes = await fetch('/api/auth/passkey/login-options', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: username })
+            });
+            const options = await optRes.json();
+
+            // 2. 바이너리 버퍼 변환
+            options.challenge = b64urlToBuffer(options.challenge);
+            if (options.allowCredentials && options.allowCredentials.length > 0) {
+                options.allowCredentials = options.allowCredentials.map(c => ({
+                    ...c,
+                    id: b64urlToBuffer(c.id)
+                }));
+            }
+
+            // 3. 브라우저 생체인증 / 스마트폰 QR 창 팝업!
+            const assertion = await navigator.credentials.get({ publicKey: options });
+
+            // 4. 서명 검증 요청
+            const verifyRes = await fetch('/api/auth/passkey/login-verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: assertion.id,
+                    response: {
+                        authenticatorData: bufferToB64url(assertion.response.authenticatorData),
+                        clientDataJSON: bufferToB64url(assertion.response.clientDataJSON),
+                        signature: bufferToB64url(assertion.response.signature)
+                    }
+                })
+            });
+
+            const data = await verifyRes.json();
+            if (verifyRes.ok && data.success) {
+                showSuccess('🎉 ' + data.message);
+                setTimeout(() => { window.location.href = '/'; }, 600);
+            } else {
+                showError(data.message || '패스키 인증에 실패했습니다.');
+            }
+        } catch (err) {
+            if (err.name === 'NotAllowedError') {
+                showError('생체인증이 취소되었거나 시간 초과되었습니다.');
+            } else {
+                showError('패스키 로그인 오류: ' + (err.message || err));
+            }
+        } finally {
+            passkeyBtn.disabled = false;
+            passkeyBtn.innerHTML = origText;
+        }
+    }
+
+    
+    let currentQrToken = null;
+    let pollInterval = null;
+
+    // [QR Remote Approval] PC 화면 로드 시 일회용 QR 생성 및 폴링 시작
+    async function initQrRemoteLogin() {
+        try {
+            const res = await fetch('/api/auth/qr/create', { method: 'POST' });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                currentQrToken = data.token;
+                const approveUrl = data.approve_url;
+                
+                // QR 코드 이미지 생성 API
+                const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=" + encodeURIComponent(approveUrl);
+                
+                document.getElementById('qrImg').src = qrUrl;
+                document.getElementById('qrLoading').style.display = 'none';
+                document.getElementById('qrImageWrap').style.display = 'block';
+
+                // 1초마다 스마트폰 승인 여부 감시 시작
+                if (pollInterval) clearInterval(pollInterval);
+                pollInterval = setInterval(pollQrApprovalStatus, 1200);
+            }
+        } catch (e) {
+            console.error("QR 세션 생성 실패:", e);
+        }
+    }
+
+    async function pollQrApprovalStatus() {
+        if (!currentQrToken) return;
+        try {
+            const res = await fetch('/api/auth/qr/poll?token=' + currentQrToken);
+            const data = await res.json();
+
+            if (data.status === 'APPROVED') {
+                // 🎉 스마트폰 지문인증 승인 완료 -> 컴퓨터 화면 자동 로그인!
+                clearInterval(pollInterval);
+                document.getElementById('qrStatusText').innerHTML = '🎉 ' + data.message;
+                showSuccess('🎉 ' + data.message + ' (메인 화면으로 이동합니다)');
+                setTimeout(() => {
+                    window.location.href = '/';
+                }, 800);
+            } else if (data.status === 'EXPIRED') {
+                clearInterval(pollInterval);
+                document.getElementById('qrStatusText').innerHTML = '<span style="color:red;">⏰ QR이 만료되었습니다. 새로고침해 주세요.</span>';
+            }
+        } catch (e) {
+            console.error("폴링 실패:", e);
+        }
+    }
+
+    window.addEventListener('DOMContentLoaded', initQrRemoteLogin);
+
+    function switchTab(mode) {
+        const tabLogin = document.getElementById('tabLogin');
+        const tabRegister = document.getElementById('tabRegister');
+        const loginForm = document.getElementById('loginForm');
+        const registerForm = document.getElementById('registerForm');
+        clearMessages();
+
+        if (mode === 'login') {
+            tabLogin.classList.add('active');
+            tabRegister.classList.remove('active');
+            loginForm.style.display = 'flex';
+            registerForm.style.display = 'none';
+            document.getElementById('loginUsername').focus();
+        } else {
+            tabRegister.classList.add('active');
+            tabLogin.classList.remove('active');
+            loginForm.style.display = 'none';
+            registerForm.style.display = 'flex';
+            document.getElementById('regUsername').focus();
+        }
+    }
+
+    function showError(msg) {
+        const box = document.getElementById('authErrorMsg');
+        box.textContent = msg;
+        box.style.display = 'block';
+        document.getElementById('authSuccessMsg').style.display = 'none';
+    }
+
+    function showSuccess(msg) {
+        const box = document.getElementById('authSuccessMsg');
+        box.textContent = msg;
+        box.style.display = 'block';
+        document.getElementById('authErrorMsg').style.display = 'none';
+    }
+
+    function clearMessages() {
+        document.getElementById('authErrorMsg').style.display = 'none';
+        document.getElementById('authSuccessMsg').style.display = 'none';
+    }
+
+    // [T07-C95, T07-C99] 로그인 처리
+    async function handleLoginSubmit(e) {
+        e.preventDefault();
+        clearMessages();
+
+        const username = document.getElementById('loginUsername').value.trim();
+        const password = document.getElementById('loginPassword').value;
+
+        if (!username || !password) {
+            showError('아이디와 비밀번호를 모두 입력해 주세요.');
+            return;
+        }
+
+        const btn = document.getElementById('loginSubmitBtn');
+        btn.disabled = true;
+        btn.textContent = '로그인 중...';
+
+        try {
+            const res = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+
+            const data = await res.json();
+
+            if (res.ok && data.success) {
+                // 로그인 성공 -> 메인 다이어리 화면으로 이동
+                window.location.href = '/';
+            } else {
+                // [T07-C99] 계정 열거 방지: 아이디가 없거나 비밀번호가 틀려도 동일 메시지
+                showError(data.message || '아이디 또는 비밀번호가 올바르지 않습니다.');
+            }
+        } catch (err) {
+            console.error('로그인 요청 실패:', err);
+            showError('서버 연결에 실패했습니다. 다시 시도해 주세요.');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '로그인';
+        }
+    }
+
+    // [T07-C94, T07-C98] 회원가입 처리
+    async function handleRegisterSubmit(e) {
+        e.preventDefault();
+        clearMessages();
+
+        const username = document.getElementById('regUsername').value.trim();
+        const password = document.getElementById('regPassword').value;
+        const confirmPw = document.getElementById('regPasswordConfirm').value;
+
+        if (username.length < 2) {
+            showError('아이디는 2자 이상 입력해 주세요.');
+            return;
+        }
+
+        if (password.length < 4) {
+            showError('비밀번호는 최소 4자 이상 입력해 주세요.');
+            return;
+        }
+
+        if (password !== confirmPw) {
+            showError('비밀번호 확인이 일치하지 않습니다.');
+            return;
+        }
+
+        const btn = document.getElementById('regSubmitBtn');
+        btn.disabled = true;
+        btn.textContent = '가입 중...';
+
+        try {
+            const res = await fetch('/api/auth/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+
+            const data = await res.json();
+
+            if (res.ok && data.success) {
+                // 회원가입 성공 -> 로그인 탭으로 전환 및 완료 메시지
+                switchTab('login');
+                showSuccess('회원가입이 완료되었습니다! 가입하신 정보로 로그인해 주세요.');
+                document.getElementById('loginUsername').value = username;
+                document.getElementById('loginPassword').value = '';
+                document.getElementById('loginPassword').focus();
+            } else {
+                // [T07-C98] 중복 아이디 안내
+                showError(data.message || '회원가입에 실패했습니다.');
+            }
+        } catch (err) {
+            console.error('가입 요청 실패:', err);
+            showError('서버 연결에 실패했습니다. 다시 시도해 주세요.');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '가입하기';
+        }
+    }
+</script>
+
+</body>
+</html>

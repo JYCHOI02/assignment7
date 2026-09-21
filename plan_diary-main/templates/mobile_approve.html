@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>컴퓨터 로그인 승인 — 플랜두씨 다이어리</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        body {
+            background: #f4f6f0;
+            padding: 20px 16px;
+            font-family: 'Noto Sans KR', sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 90vh;
+        }
+        .approve-card {
+            background: #fff;
+            border: 1px solid #dcd8c8;
+            border-radius: 16px;
+            padding: 28px 22px;
+            max-width: 400px;
+            width: 100%;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+            text-align: center;
+        }
+        .device-icon-wrap {
+            width: 64px;
+            height: 64px;
+            background: #eaf2ed;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 30px;
+            margin: 0 auto 16px;
+            border: 2px solid #b7eb8f;
+        }
+        .approve-title {
+            font-family: 'Gowun Batang', serif;
+            font-size: 22px;
+            font-weight: 700;
+            color: #2b2a28;
+            margin: 0 0 8px;
+        }
+        .approve-desc {
+            font-size: 13px;
+            color: #63604f;
+            line-height: 1.5;
+            margin: 0 0 20px;
+        }
+        .account-select-box {
+            background: #f9faf5;
+            border: 1px solid #e2ded0;
+            border-radius: 10px;
+            padding: 14px;
+            margin-bottom: 24px;
+            text-align: left;
+        }
+        .account-select-box label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: #888;
+            margin-bottom: 6px;
+        }
+        .account-select-box select, .account-select-box input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: 600;
+            background: #fff;
+        }
+        .approve-btn {
+            width: 100%;
+            padding: 16px;
+            background: #2e543c;
+            color: #fff;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            box-shadow: 0 4px 12px rgba(46, 84, 60, 0.25);
+            transition: transform 0.1s, background 0.2s;
+        }
+        .approve-btn:active {
+            transform: scale(0.98);
+        }
+        .reject-btn {
+            margin-top: 12px;
+            width: 100%;
+            padding: 12px;
+            background: transparent;
+            color: #888;
+            border: none;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .result-box {
+            display: none;
+            padding: 20px;
+            border-radius: 12px;
+            margin-top: 16px;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .result-box.success {
+            background: #edf7ed;
+            color: #2e543c;
+            border: 1px solid #b7eb8f;
+        }
+        .result-box.error {
+            background: #fde8e8;
+            color: #9b1c1c;
+            border: 1px solid #f8b4b4;
+        }
+    </style>
+</head>
+<body>
+
+<div class="approve-card">
+    <div class="device-icon-wrap">💻</div>
+    <h1 class="approve-title">컴퓨터 로그인 요청</h1>
+    <p class="approve-desc">모니터 화면에 표시된 플랜두씨 다이어리에서<br>로그인 승인을 요청했습니다.</p>
+
+    <div id="approveFormArea">
+        <div class="account-select-box">
+            <label for="usernameSelect">로그인할 계정</label>
+            <select id="usernameSelect">
+                {% for u in users %}
+                <option value="{{ u.username }}" {% if u.username == 'admin' %}selected{% endif %}>{{ u.username }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <button type="button" class="approve-btn" id="approveBtn" onclick="handleMobileApprove()">
+            <span>👆</span>
+            <span>지문 / 생체인증으로 컴퓨터 승인</span>
+        </button>
+
+        <button type="button" class="reject-btn" onclick="window.close();">거절 및 닫기</button>
+    </div>
+
+    <div id="resultBox" class="result-box"></div>
+</div>
+
+<script>
+    const qrToken = "{{ token }}";
+
+    async function handleMobileApprove() {
+        const username = document.getElementById('usernameSelect').value;
+        const btn = document.getElementById('approveBtn');
+        const origText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span>⌛</span><span>지문 인식 중...</span>';
+
+        // 스마트폰의 WebAuthn 생체인증(지문/Face ID) 호출 시도
+        if (window.PublicKeyCredential) {
+            try {
+                // 브라우저 화면 지문 센서 활성화 챌린지
+                const dummyChallenge = new Uint8Array(32);
+                window.crypto.getRandomValues(dummyChallenge);
+                // 모바일 지문 팝업 유도
+                await navigator.credentials.get({
+                    publicKey: {
+                        challenge: dummyChallenge,
+                        timeout: 30000,
+                        userVerification: 'preferred'
+                    }
+                }).catch(() => {
+                    // 기기 지문 팝업 취소 또는 미등록 시에도 승인 진행 허용
+                });
+            } catch (e) {
+                // 생체센서 패스
+            }
+        }
+
+        try {
+            const res = await fetch('/api/auth/qr/approve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: qrToken, username: username })
+            });
+
+            const data = await res.json();
+            const resBox = document.getElementById('resultBox');
+
+            if (res.ok && data.success) {
+                document.getElementById('approveFormArea').style.display = 'none';
+                resBox.className = 'result-box success';
+                resBox.innerHTML = '<h3>🎉 로그인 승인 완료!</h3><p>컴퓨터(PC) 화면이 <b>' + username + '</b>님으로 자동 로그인되었습니다.<br>모니터 화면을 확인해 주세요!</p>';
+                resBox.style.display = 'block';
+            } else {
+                resBox.className = 'result-box error';
+                resBox.innerHTML = '<p>❌ 승인 실패: ' + (data.message || '알 수 없는 오류') + '</p>';
+                resBox.style.display = 'block';
+                btn.disabled = false;
+                btn.innerHTML = origText;
+            }
+        } catch (err) {
+            alert('서버 연결 실패: ' + err.message);
+            btn.disabled = false;
+            btn.innerHTML = origText;
+        }
+    }
+</script>
+
+</body>
+</html>

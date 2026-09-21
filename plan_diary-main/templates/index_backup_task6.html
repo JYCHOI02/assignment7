@@ -5,12 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Plan → Do → See</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-<script>
-    // WebAuthn W3C 표준 규격: IP 주소(127.0.0.1)는 유효한 도메인이 아니므로 localhost로 자동 전환
-    if (window.location.hostname === '127.0.0.1') {
-        window.location.href = window.location.href.replace('127.0.0.1', 'localhost');
-    }
-</script>
 </head>
 
 <body>
@@ -20,19 +14,6 @@
     <header>
         <div class="header-top-row">
             <div class="badge">PLAN → DO → SEE</div>
-            <div class="user-auth-bar" style="display: flex; align-items: center; gap: 10px;">
-                <span id="user-info-text" style="font-size: 13px; font-weight: 600; color: #2b2a28;">
-                    👤 <strong>{{ current_user.username }}</strong>님
-                </span>
-                <!-- 📱 [Passkey] 내 스마트폰 / 생체인증 등록 버튼 -->
-                <button type="button" class="passkey-reg-btn" id="passkey-reg-btn" onclick="handleRegisterPasskey()" title="스마트폰 지문/얼굴 또는 노트북 생체인증을 등록하여 비밀번호 없이 1초 로그인" style="padding: 5px 12px; font-size: 12px; background: #2e543c; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                    <span>📱</span>
-                    <span>패스키(스마트폰/지문) 등록</span>
-                </button>
-                <button type="button" class="logout-btn" id="logout-btn" onclick="handleLogout()" style="padding: 5px 12px; font-size: 12px; background: #b23a3a; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; transition: opacity 0.2s;">
-                    로그아웃
-                </button>
-            </div>
             <button type="button" class="export-header-btn" id="export-top-btn" title="내 계획과 기록 전체를 단일 파일(JSON)로 내보내기">
                 📥 전체 자료 파일로 내보내기 (JSON)
             </button>
@@ -43,12 +24,12 @@
             돌아보며(See) 다음 계획으로 연결합니다.
         </p>
 
-        <!-- 🔒 [T07] 인증 상태 안내: 개인 보관함 및 데이터 격리 안내 배너 -->
-        <div class="public-notice-banner auth-secure-banner" id="public-notice-banner" role="alert" style="background: #edf7ed; border: 1px solid #b7eb8f; color: #2e543c;">
-            <span class="notice-icon">🔒</span>
+        <!-- 📢 첫 화면 안내: 비로그인 및 공개 상태 알림 (잠기지 않은 상태 안내) -->
+        <div class="public-notice-banner" id="public-notice-banner" role="alert">
+            <span class="notice-icon">📢</span>
             <div class="notice-text-wrap">
-                <span class="notice-status-tag" style="background: #4c7a5e; color: #fff;">보안 인증 완료 · 개인 보관함</span>
-                <span class="notice-main-text"><strong>{{ current_user.username }}</strong>님의 계정으로 안전하게 로그인되었습니다. 다른 사용자의 데이터와 완전히 분리되어 보호받습니다.</span>
+                <span class="notice-status-tag">공개 · 미잠금 상태</span>
+                <span class="notice-main-text">지금은 로그인이 없어 링크를 아는 사람은 누구나 볼 수 있습니다. 남이 봐도 괜찮은 내용만 넣으세요.</span>
             </div>
         </div>
     </header>
@@ -788,102 +769,6 @@
 </div>
 
 <script src="{{ url_for('static', filename='script.js') }}"></script>
-<script>
-    
-    // Base64URL <-> ArrayBuffer 유틸리티 함수
-    function b64urlToBuffer(b64url) {
-        const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
-        const pad = '='.repeat((4 - (b64.length % 4)) % 4);
-        const bin = atob(b64 + pad);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        return bytes.buffer;
-    }
-
-    function bufferToB64url(buffer) {
-        const bytes = new Uint8Array(buffer);
-        let bin = '';
-        for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
-        return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    }
-
-    // [Passkey / WebAuthn] 현재 기기 또는 스마트폰을 패스키로 등록
-    async function handleRegisterPasskey() {
-        if (!window.PublicKeyCredential) {
-            alert('현재 브라우저가 패스키(WebAuthn / FIDO2)를 지원하지 않습니다.');
-            return;
-        }
-
-        const deviceName = prompt('등록할 인증 기기 이름을 입력하세요 (예: 내 아이폰, 갤럭시, 노트북 Windows Hello):', '내 스마트폰');
-        if (!deviceName) return;
-
-        const regBtn = document.getElementById('passkey-reg-btn');
-        const origText = regBtn.innerHTML;
-        regBtn.disabled = true;
-        regBtn.innerHTML = '<span>⌛</span><span>기기 인증 대기 중...</span>';
-
-        try {
-            // 1. 서버에 등록 챌린지 옵션 요청
-            const optRes = await fetch('/api/auth/passkey/register-options', { method: 'POST' });
-            if (!optRes.ok) {
-                const errData = await optRes.json();
-                throw new Error(errData.message || '등록 옵션 생성 실패');
-            }
-            const options = await optRes.json();
-
-            // 2. 버퍼 변환
-            options.challenge = b64urlToBuffer(options.challenge);
-            options.user.id = b64urlToBuffer(options.user.id);
-
-            // 3. 브라우저 생체인증 / 스마트폰 QR 화면 팝업!
-            const credential = await navigator.credentials.create({ publicKey: options });
-
-            // 4. 서명 공개키 서버 전송 및 저장
-            const verifyRes = await fetch('/api/auth/passkey/register-verify', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    device_name: deviceName,
-                    response: {
-                        attestationObject: bufferToB64url(credential.response.attestationObject),
-                        clientDataJSON: bufferToB64url(credential.response.clientDataJSON)
-                    }
-                })
-            });
-
-            const data = await verifyRes.json();
-            if (verifyRes.ok && data.success) {
-                alert('🎉 스마트폰 / 생체인증(패스키) 등록 완료!\n\n이제 비밀번호를 칠 필요 없이, 로그인 화면에서 [스마트폰 / 생체인증 로그인] 버튼 하나로 1초 만에 로그인하실 수 있습니다.');
-            } else {
-                alert('패스키 등록 실패: ' + (data.message || '알 수 없는 오류'));
-            }
-        } catch (err) {
-            if (err.name === 'NotAllowedError') {
-                alert('인증이 취소되었거나 거부되었습니다.');
-            } else {
-                alert('패스키 등록 중 오류 발생: ' + (err.message || err));
-            }
-        } finally {
-            regBtn.disabled = false;
-            regBtn.innerHTML = origText;
-        }
-    }
-
-    async function handleLogout() {
-        if (confirm("로그아웃 하시겠습니까?")) {
-            try {
-                const res = await fetch("/api/auth/logout", { method: "POST" });
-                if (res.ok) {
-                    window.location.href = "/login";
-                } else {
-                    alert("로그아웃 처리 중 오류가 발생했습니다.");
-                }
-            } catch (err) {
-                window.location.href = "/login";
-            }
-        }
-    }
-</script>
 
 </body>
 </html>
