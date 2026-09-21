@@ -1,0 +1,231 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PDS Database Schema Contract v2",
+  "description": "Plan-Do-See (PDS) 시스템 최종 데이터베이스의 표(Tables), 항목(Columns), 관계(Relationships/Foreign Keys), 및 날짜 규칙(Date & Time Rules) 정의서",
+  "version": "2.0.0",
+  "timezone": {
+    "name": "Asia/Seoul",
+    "standard": "KST (UTC+9)",
+    "description": "모든 날짜 및 시간 데이터는 서울 표준시(KST)를 기준으로 기록, 계산, 판정됩니다."
+  },
+  "dateTimeRules": {
+    "dateFormat": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "example": "2026-09-18",
+      "description": "시작일(start_date) 및 종료일(end_date)에 적용되는 ISO 8601 YYYY-MM-DD 포맷"
+    },
+    "timestampFormat": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$",
+      "example": "2026-09-18 10:00:00",
+      "description": "생성일(created_at), 수정일(updated_at/modified_at), 완료일(completed_at), 적용일(applied_at)에 적용되는 초 단위 일시 포맷"
+    },
+    "executionTimeFormat": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}$",
+      "example": "2026-09-18T14:30",
+      "description": "실행 기록(start_time, end_time)에 적용되는 HTML5 datetime-local 호환 포맷"
+    },
+    "durationCalculation": {
+      "rule": "actual_minutes = floor((end_time - start_time) in minutes)",
+      "validation": "end_time은 반드시 start_time보다 미래 시점이어야 함 (최소 1분 이상)",
+      "minuteStepRule": "시간 입력 UI에서 분 선택 시 00부터 시작하도록 기본 포커스 및 스텝 제공"
+    },
+    "delayJudgmentRule": {
+      "code": "T06-C30",
+      "rule": "status != '완료' AND current_end_date < KST_TODAY_DATE",
+      "description": "완료되지 않은 계획 중 마감일(종료일)이 서울 시간 기준 오늘보다 앞선 계획만 지연으로 판정합니다. 이미 완료된 계획은 마감일이 지났더라도 지연으로 이중 계산하지 않습니다."
+    }
+  },
+  "tables": {
+    "plans": {
+      "description": "계획(Plan) 마스터 테이블. 계획의 초기 생성 값과 현재 최신 상태를 함께 관리합니다.",
+      "primaryKey": ["id"],
+      "columns": {
+        "id": { "type": "INTEGER", "primaryKey": true, "autoIncrement": true, "description": "계획 고유 식별자 ID" },
+        "title": { "type": "TEXT", "nullable": false, "description": "현재 계획 제목 (예: [개선] XSS 방어 검증)" },
+        "original_title": { "type": "TEXT", "nullable": false, "default": "", "description": "최초 생성 당시의 원래 계획 제목 (불변성 보존)" },
+        "original_priority": { "type": "TEXT", "nullable": false, "default": "1순위", "description": "최초 생성 당시의 우선순위 (예: 1순위, 2순위)" },
+        "original_start_date": { "type": "TEXT", "nullable": false, "description": "최초 계획 시작일 (YYYY-MM-DD)" },
+        "original_end_date": { "type": "TEXT", "nullable": false, "description": "최초 계획 마감일 (YYYY-MM-DD)" },
+        "original_success_criteria": { "type": "TEXT", "nullable": false, "description": "최초 완료 성공 기준" },
+        "original_expected_minutes": { "type": "INTEGER", "nullable": false, "description": "최초 예상 소요 시간(분)" },
+        "current_priority": { "type": "TEXT", "nullable": false, "default": "1순위", "description": "현재 우선순위 (드래그앤드롭/버튼 슬라이드로 변경 가능)" },
+        "current_start_date": { "type": "TEXT", "nullable": false, "description": "현재 계획 시작일 (YYYY-MM-DD)" },
+        "current_end_date": { "type": "TEXT", "nullable": false, "description": "현재 계획 마감일 (YYYY-MM-DD)" },
+        "current_success_criteria": { "type": "TEXT", "nullable": false, "description": "현재 완료 성공 기준" },
+        "current_expected_minutes": { "type": "INTEGER", "nullable": false, "description": "현재 예상 소요 시간(분)" },
+        "status": { "type": "TEXT", "nullable": false, "default": "진행중", "enum": ["진행중", "완료"], "description": "계획 상태" },
+        "tags": { "type": "TEXT", "nullable": false, "default": "", "description": "쉼표(,)로 구분된 태그 목록 (예: 보안, 점검)" },
+        "created_at": { "type": "TEXT", "nullable": false, "description": "최초 생성 일시 (YYYY-MM-DD HH:MM:SS)" },
+        "updated_at": { "type": "TEXT", "nullable": false, "description": "최종 수정 일시 (YYYY-MM-DD HH:MM:SS)" }
+      }
+    },
+    "plan_history": {
+      "description": "계획 수정 이력 테이블 (T06-C08). 계획을 수정할 때 기존 계획을 덮어쓰지 않고 변경 전 버전을 누적 보존합니다.",
+      "primaryKey": ["id"],
+      "foreignKeys": [
+        {
+          "column": "plan_id",
+          "referencesTable": "plans",
+          "referencesColumn": "id",
+          "onDelete": "CASCADE"
+        }
+      ],
+      "columns": {
+        "id": { "type": "INTEGER", "primaryKey": true, "autoIncrement": true, "description": "이력 고유 식별자 ID" },
+        "plan_id": { "type": "INTEGER", "nullable": false, "description": "대상 계획 ID" },
+        "version": { "type": "INTEGER", "nullable": false, "default": 1, "description": "수정 전 버전 번호 (1부터 순차 증가)" },
+        "title": { "type": "TEXT", "nullable": false, "description": "수정 전 계획 제목" },
+        "priority": { "type": "TEXT", "nullable": false, "description": "수정 전 우선순위" },
+        "start_date": { "type": "TEXT", "nullable": false, "description": "수정 전 시작일 (YYYY-MM-DD)" },
+        "end_date": { "type": "TEXT", "nullable": false, "description": "수정 전 마감일 (YYYY-MM-DD)" },
+        "success_criteria": { "type": "TEXT", "nullable": false, "description": "수정 전 완료 성공 기준" },
+        "expected_minutes": { "type": "INTEGER", "nullable": false, "description": "수정 전 예상 소요 시간(분)" },
+        "status": { "type": "TEXT", "nullable": false, "default": "진행중", "description": "수정 전 계획 상태" },
+        "tags": { "type": "TEXT", "nullable": false, "default": "", "description": "수정 전 태그 목록" },
+        "modified_at": { "type": "TEXT", "nullable": false, "description": "수정 발생 일시 (YYYY-MM-DD HH:MM:SS)" }
+      }
+    },
+    "execution_records": {
+      "description": "실행 기록(Do) 테이블. 계획을 실행한 시간, 실제 소요 시간, 병목(막힘) 요인, 메모를 누적 저장합니다.",
+      "primaryKey": ["id"],
+      "foreignKeys": [
+        {
+          "column": "plan_id",
+          "referencesTable": "plans",
+          "referencesColumn": "id",
+          "onDelete": "CASCADE"
+        }
+      ],
+      "uniqueConstraints": [
+        {
+          "name": "idx_exec_plan_times",
+          "columns": ["plan_id", "start_time", "end_time"],
+          "description": "동일 계획에 동일 시작-종료 시간의 중복 실행 기록 등록 방지"
+        }
+      ],
+      "columns": {
+        "id": { "type": "INTEGER", "primaryKey": true, "autoIncrement": true, "description": "실행 기록 고유 식별자 ID" },
+        "plan_id": { "type": "INTEGER", "nullable": false, "description": "대상 계획 ID" },
+        "start_time": { "type": "TEXT", "nullable": false, "description": "실행 시작 일시 (YYYY-MM-DDTHH:MM)" },
+        "end_time": { "type": "TEXT", "nullable": false, "description": "실행 종료 일시 (YYYY-MM-DDTHH:MM)" },
+        "actual_minutes": { "type": "INTEGER", "nullable": false, "description": "실제 소요 시간(분 단위)" },
+        "blocker_reason": { "type": "TEXT", "nullable": false, "default": "", "description": "실행 중 겪은 막힘/병목 사유 (미발생 시 빈 문자열)" },
+        "memo": { "type": "TEXT", "nullable": false, "default": "", "description": "실행 상세 메모" },
+        "created_at": { "type": "TEXT", "nullable": false, "description": "실행 기록 등록 일시 (YYYY-MM-DD HH:MM:SS)" }
+      }
+    },
+    "completion_records": {
+      "description": "완료 기록 보존 테이블. 완료 버튼 다회 클릭 시에도 1회만 보존되고 완료 수가 1만 증가하도록 단일성 및 멱등성을 보장합니다.",
+      "primaryKey": ["id"],
+      "foreignKeys": [
+        {
+          "column": "plan_id",
+          "referencesTable": "plans",
+          "referencesColumn": "id",
+          "onDelete": "CASCADE"
+        }
+      ],
+      "uniqueConstraints": [
+        {
+          "name": "plan_id_unique",
+          "columns": ["plan_id"],
+          "description": "계획당 단 하나의 완료 기록만 존재하도록 강제 (중복 완료 방지)"
+        }
+      ],
+      "columns": {
+        "id": { "type": "INTEGER", "primaryKey": true, "autoIncrement": true, "description": "완료 기록 고유 ID" },
+        "plan_id": { "type": "INTEGER", "nullable": false, "unique": true, "description": "완료된 계획 ID (UNIQUE)" },
+        "completed_at": { "type": "TEXT", "nullable": false, "description": "완료 처리 일시 (YYYY-MM-DD HH:MM:SS)" }
+      }
+    },
+    "next_actions": {
+      "description": "돌아보기(See)에서 다음 계획(Plan)으로 넘길 한 줄(개선 액션) 보존 테이블 (See → Plan 연계).",
+      "primaryKey": ["id"],
+      "foreignKeys": [
+        {
+          "column": "source_plan_id",
+          "referencesTable": "plans",
+          "referencesColumn": "id",
+          "onDelete": "SET NULL"
+        }
+      ],
+      "columns": {
+        "id": { "type": "INTEGER", "primaryKey": true, "autoIncrement": true, "description": "고칠 점 고유 ID" },
+        "action_text": { "type": "TEXT", "nullable": false, "description": "다음 계획에 반영할 고칠 점(개선 한 줄)" },
+        "source_type": { "type": "TEXT", "nullable": false, "default": "custom", "description": "출처 유형 ('reflection', 'blocker', 'custom')" },
+        "source_plan_id": { "type": "INTEGER", "nullable": true, "description": "근거가 된 계획 ID (옵션)" },
+        "created_at": { "type": "TEXT", "nullable": false, "description": "고칠 점 등록 일시 (YYYY-MM-DD HH:MM:SS)" },
+        "applied_at": { "type": "TEXT", "nullable": true, "description": "새 계획에 적용된 일시 (YYYY-MM-DD HH:MM:SS)" }
+      }
+    },
+    "plan_tasks": {
+      "description": "계획에 딸린 세부 할 일(체크리스트/Subtasks) 테이블. 한 계획에 5개 이상의 세부 과제를 등록·수정·삭제하고 완료 여부를 관리합니다.",
+      "primaryKey": ["id"],
+      "foreignKeys": [
+        {
+          "column": "plan_id",
+          "referencesTable": "plans",
+          "referencesColumn": "id",
+          "onDelete": "CASCADE"
+        }
+      ],
+      "columns": {
+        "id": { "type": "INTEGER", "primaryKey": true, "autoIncrement": true, "description": "할 일 고유 식별자 ID" },
+        "plan_id": { "type": "INTEGER", "nullable": false, "description": "상위 계획 ID" },
+        "title": { "type": "TEXT", "nullable": false, "description": "세부 할 일 내용" },
+        "is_completed": { "type": "INTEGER", "nullable": false, "default": 0, "description": "완료 여부 (0: 미완료, 1: 완료)" },
+        "due_date": { "type": "TEXT", "nullable": false, "default": "", "description": "할 일 마감일 (YYYY-MM-DD)" },
+        "order_num": { "type": "INTEGER", "nullable": false, "default": 1, "description": "정렬 순서" },
+        "created_at": { "type": "TEXT", "nullable": false, "description": "할 일 등록 일시 (YYYY-MM-DD HH:MM:SS)" },
+        "updated_at": { "type": "TEXT", "nullable": false, "description": "할 일 최종 수정 일시 (YYYY-MM-DD HH:MM:SS)" }
+      }
+    }
+  },
+  "relationships": [
+    {
+      "parentTable": "plans",
+      "parentColumn": "id",
+      "childTable": "plan_tasks",
+      "childColumn": "plan_id",
+      "type": "1:N",
+      "onDelete": "CASCADE",
+      "description": "하나의 계획은 0개 또는 5개 이상의 세부 딸린 할 일(Subtasks)을 보유할 수 있습니다."
+    },
+    {
+      "parentTable": "plans",
+      "parentColumn": "id",
+      "childTable": "plan_history",
+      "childColumn": "plan_id",
+      "type": "1:N",
+      "onDelete": "CASCADE",
+      "description": "하나의 계획은 0개 이상의 수정 전 이력 버전을 보유할 수 있습니다."
+    },
+    {
+      "parentTable": "plans",
+      "parentColumn": "id",
+      "childTable": "execution_records",
+      "childColumn": "plan_id",
+      "type": "1:N",
+      "onDelete": "CASCADE",
+      "description": "하나의 계획은 0개 이상의 실행 기록(Do)을 보유할 수 있습니다."
+    },
+    {
+      "parentTable": "plans",
+      "parentColumn": "id",
+      "childTable": "completion_records",
+      "childColumn": "plan_id",
+      "type": "1:1",
+      "onDelete": "CASCADE",
+      "description": "완료된 계획은 정확히 1개의 완료 기록을 보유합니다 (중복 생성 방지)."
+    },
+    {
+      "parentTable": "plans",
+      "parentColumn": "id",
+      "childTable": "next_actions",
+      "childColumn": "source_plan_id",
+      "type": "1:N",
+      "onDelete": "SET NULL",
+      "description": "특정 계획의 실행/막힘에서 도출된 고칠 점은 해당 계획을 참조할 수 있습니다."
+    }
+  ]
+}

@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plan → Do → See</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+
+<div class="container">
+
+    <header>
+        <div class="header-top-row">
+            <div class="badge">PLAN → DO → SEE</div>
+            <button type="button" class="export-header-btn" id="export-top-btn" title="내 계획과 기록 전체를 단일 파일(JSON)로 내보내기">
+                📥 전체 자료 파일로 내보내기 (JSON)
+            </button>
+        </div>
+        <h1>Plan → Do → See</h1>
+        <p>
+            계획을 세우고(Plan), 실제로 한 일을 기록하고(Do),
+            돌아보며(See) 다음 계획으로 연결합니다.
+        </p>
+
+        <!-- 📢 첫 화면 안내: 비로그인 및 공개 상태 알림 (잠기지 않은 상태 안내) -->
+        <div class="public-notice-banner" id="public-notice-banner" role="alert">
+            <span class="notice-icon">📢</span>
+            <div class="notice-text-wrap">
+                <span class="notice-status-tag">공개 · 미잠금 상태</span>
+                <span class="notice-main-text">지금은 로그인이 없어 링크를 아는 사람은 누구나 볼 수 있습니다. 남이 봐도 괜찮은 내용만 넣으세요.</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- 🧭 PDS 3단계 탭 네비게이션 (스크롤 없는 모듈형 뷰 전환) -->
+    <nav class="pds-tab-nav" aria-label="Plan Do See 단계 전환">
+        <button type="button" class="pds-tab-btn active" data-tab="plan" id="tab-btn-plan">
+            <span class="tab-icon">📋</span>
+            <span class="tab-label">PLAN (계획)</span>
+            <span class="tab-badge" id="tab-badge-plan">0</span>
+        </button>
+        <button type="button" class="pds-tab-btn" data-tab="do" id="tab-btn-do">
+            <span class="tab-icon">⚡</span>
+            <span class="tab-label">DO (실행)</span>
+            <span class="tab-badge" id="tab-badge-do">0</span>
+        </button>
+        <button type="button" class="pds-tab-btn" data-tab="see" id="tab-btn-see">
+            <span class="tab-icon">📊</span>
+            <span class="tab-label">SEE (돌아보기)</span>
+            <span class="tab-badge" id="tab-badge-see">0%</span>
+        </button>
+    </nav>
+
+    <!-- 계획 작성 영역 (PLAN) -->
+    <section class="card" id="form-section">
+
+        <div class="section-title">
+            <div>
+                <span class="step plan-step">PLAN</span>
+                <h2 id="form-title">새 계획 작성</h2>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span id="mode-text" class="mode">새 계획</span>
+                <button type="button" class="secondary-button hidden" id="new-plan-form-btn">
+                    + 새 계획 작성
+                </button>
+            </div>
+        </div>
+
+
+        <form id="plan-form">
+
+            <div class="form-row">
+                <div class="form-group flex-grow">
+                    <label for="title">무엇을 할 건가요?</label>
+                    <input
+                        type="text"
+                        id="title"
+                        placeholder="예: 정보처리기사 공부"
+                        maxlength="100"
+                        required
+                    >
+                </div>
+
+                <div class="form-group priority-group">
+                    <label>우선순위</label>
+                    <div class="priority-display-container">
+                        <span id="form-priority-display" class="priority-display-tag">자동 배정</span>
+                    </div>
+                    <div class="help" style="font-size: 11px;">저장 후 목록에서 슬라이드로 변경</div>
+                </div>
+            </div>
+
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="start-date">시작일</label>
+                    <input type="date" id="start-date" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="end-date">종료일</label>
+                    <input type="date" id="end-date" required>
+                </div>
+            </div>
+
+
+            <div class="form-group">
+                <label for="success-criteria">성공 기준</label>
+                <textarea
+                    id="success-criteria"
+                    placeholder="예: 기출문제 3회분을 풀고 평균 80점 이상"
+                    maxlength="500"
+                    required
+                ></textarea>
+                <div class="help">
+                    무엇을 달성하면 이 계획이 성공했다고 판단할지 적어주세요.
+                </div>
+            </div>
+
+
+            <div class="form-group">
+                <label for="expected-minutes">예상 시간</label>
+                <div class="time-input">
+                    <input
+                        type="number"
+                        id="expected-minutes"
+                        min="1"
+                        placeholder="120"
+                        required
+                    >
+                    <span>분</span>
+                </div>
+            </div>
+
+
+            <div class="form-group">
+                <label for="tags">태그 (선택)</label>
+                <input
+                    type="text"
+                    id="tags"
+                    placeholder="예: 공부, 자격증, 코딩 (쉼표로 구분)"
+                    maxlength="100"
+                >
+                <div class="help">
+                    쉼표(,)로 구분하여 여러 개의 태그를 입력할 수 있습니다. (예: 운동, 건강, 습관)
+                </div>
+            </div>
+
+
+            <div class="button-row">
+                <button type="submit" class="primary-button" id="submit-button">
+                    계획 저장
+                </button>
+
+                <button type="button" class="secondary-button hidden" id="cancel-button">
+                    수정 취소
+                </button>
+
+                <button type="button" class="primary-button hidden" id="new-plan-action-btn">
+                    + 새 계획 작성하기
+                </button>
+            </div>
+
+        </form>
+
+    </section>
+
+
+    <!-- 저장된 계획 목록 -->
+    <section class="card hidden" id="plan-list-section">
+
+        <div class="section-title">
+            <div>
+                <span class="step list-step">📋</span>
+                <h2>저장된 계획 목록 (<span id="plan-count">0</span>개)</h2>
+            </div>
+
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <button type="button" class="secondary-button" id="reorder-toggle-btn">
+                    🔄 우선순위 변경
+                </button>
+                <button type="button" class="secondary-button" id="list-new-plan-btn">
+                    + 새 계획 작성
+                </button>
+            </div>
+        </div>
+
+        <!-- 우선순위 변경 안내 가이드 -->
+        <div id="reorder-guide" class="reorder-guide hidden">
+            <span>👆 <strong>카드를 클릭하고 위아래로 슬라이드(드래그)</strong>하여 우선순위를 변경하세요.</span>
+            <button type="button" class="primary-button" id="reorder-done-btn" style="padding: 6px 14px; font-size: 12px;">
+                완료
+            </button>
+        </div>
+
+        <!-- 🔍 검색 및 조건 필터 툴바 -->
+        <div class="filter-toolbar">
+            <div class="search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="plan-search-input" placeholder="계획명, 태그, 성공 기준 텍스트로 검색...">
+                <button type="button" id="search-clear-btn" class="search-clear-btn hidden" title="검색어 지우기">✕</button>
+            </div>
+
+            <div class="filter-controls">
+                <div class="filter-item">
+                    <label for="filter-status">상태</label>
+                    <select id="filter-status">
+                        <option value="all">전체 상태</option>
+                        <option value="진행중">진행중</option>
+                        <option value="완료">완료</option>
+                        <option value="지연">⏰ 지연 (마감 초과)</option>
+                        <option value="막힘">🚧 막힘 (병목 발생)</option>
+                    </select>
+                </div>
+
+                <div class="filter-item">
+                    <label for="filter-priority">우선순위</label>
+                    <select id="filter-priority">
+                        <option value="all">전체 우선순위</option>
+                        <option value="1순위">1순위</option>
+                        <option value="2순위">2순위</option>
+                        <option value="3순위">3순위</option>
+                    </select>
+                </div>
+
+                <div class="filter-item">
+                    <label for="filter-tag">태그</label>
+                    <select id="filter-tag">
+                        <option value="all">전체 태그</option>
+                    </select>
+                </div>
+
+                <div class="filter-item">
+                    <label for="sort-by">정렬 기준</label>
+                    <select id="sort-by">
+                        <option value="priority-asc">우선순위순</option>
+                        <option value="date-desc">최신 등록순</option>
+                        <option value="due-asc">마감일 임박순</option>
+                        <option value="time-asc">예상시간 짧은순</option>
+                    </select>
+                </div>
+
+                <button type="button" id="filter-reset-btn" class="filter-reset-btn" title="모든 검색 및 필터 초기화">
+                    ↺ 필터 초기화
+                </button>
+            </div>
+
+            <div id="filter-status-summary" class="filter-status-summary hidden">
+                <span id="filter-summary-text"></span>
+            </div>
+        </div>
+
+        <!-- 필터 결과 없을 때 안내 -->
+        <div id="plan-empty-filter" class="plan-empty-filter hidden">
+            <p>🔍 조건에 맞는 계획이 없습니다.</p>
+            <button type="button" class="secondary-button" id="empty-reset-btn">필터 초기화</button>
+        </div>
+
+        <div id="plan-list" class="plan-list">
+            <!-- 계획 목록 항목들이 여기에 동적으로 렌더링됩니다 -->
+        </div>
+
+    </section>
+
+
+    <!-- 🗂 우측 슬라이드 패널 (옵션 B: 현재 계획 상세 및 계획 수정 이력) -->
+    <div id="drawer-backdrop" class="drawer-backdrop"></div>
+    <aside id="plan-detail-drawer" class="plan-detail-drawer" aria-label="계획 상세 및 수정 이력">
+
+        <!-- 슬라이드 드로어 상단 헤더 바 -->
+        <div class="drawer-header">
+            <div class="drawer-header-title">
+                <span class="drawer-badge">PLAN DETAIL</span>
+                <h3>계획 상세 &amp; 수정 이력</h3>
+            </div>
+            <button type="button" class="drawer-close-btn" id="drawer-close-btn" title="닫기 (Esc)">
+                ✕ 닫기
+            </button>
+        </div>
+
+        <div class="drawer-body">
+            <!-- 현재 계획 상세 -->
+            <section class="drawer-card" id="current-plan-section">
+
+                <div class="section-title">
+                    <div>
+                        <span class="drawer-step-icon">📋</span>
+                        <h2>현재 계획 상세</h2>
+                    </div>
+
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <button type="button" class="status-toggle-btn" id="current-status-btn">
+                            ✓ 완료
+                        </button>
+                        <button type="button" class="edit-button" id="edit-button">
+                            수정하기
+                        </button>
+                        <button type="button" class="plan-delete-btn" id="delete-button">
+                            삭제
+                        </button>
+                    </div>
+                </div>
+
+                <div class="plan-main">
+                    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 24px;">
+                        <h3 id="display-title" style="margin: 0;"></h3>
+                        <span id="display-status-badge" class="plan-status-badge status-진행중">진행중</span>
+                    </div>
+
+                    <div class="info-grid">
+                        <div class="info-box">
+                            <span class="label">우선순위</span>
+                            <strong id="display-priority"></strong>
+                        </div>
+
+                        <div class="info-box">
+                            <span class="label">기간</span>
+                            <strong id="display-period"></strong>
+                        </div>
+
+                        <div class="info-box">
+                            <span class="label">성공 기준</span>
+                            <strong id="display-success"></strong>
+                        </div>
+
+                        <div class="info-box">
+                            <span class="label">예상 시간</span>
+                            <strong id="display-time"></strong>
+                        </div>
+
+                        <div class="info-box info-box-wide">
+                            <span class="label">태그</span>
+                            <div id="display-tags" class="plan-tags-display"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="updated">
+                    마지막 수정: <span id="display-updated"></span>
+                </div>
+
+                <div style="margin-top: 14px; padding-top: 12px; border-top: 1px dashed #e2e8f0; display: flex; justify-content: flex-end;">
+                    <button type="button" class="do-shortcut-btn" id="drawer-goto-do-btn" title="이 계획의 실행(DO)을 기록하러 이동">
+                        ⚡ 이 계획 실행(DO) 기록하러 가기 ❯
+                    </button>
+                </div>
+
+            </section>
+
+            <!-- 📌 계획에 딸린 할 일 (세부 할 일 목록) -->
+            <section class="drawer-card" id="plan-tasks-section" style="margin-top: 20px;">
+
+                <div class="section-title">
+                    <div>
+                        <span class="drawer-step-icon">☑️</span>
+                        <div>
+                            <h2>딸린 할 일 목록</h2>
+                            <p class="section-description">
+                                이 계획을 실행하기 위한 세부 할 일(체크리스트)을 관리합니다.
+                            </p>
+                        </div>
+                    </div>
+                    <span id="plan-tasks-count-badge" class="history-count-badge">할 일 0건</span>
+                </div>
+
+                <!-- 진행률 프로그레스 바 -->
+                <div class="tasks-progress-wrap" id="tasks-progress-wrap">
+                    <div class="tasks-progress-label">
+                        <span id="tasks-progress-text">완료율: 0% (0 / 0개)</span>
+                    </div>
+                    <div class="tasks-progress-bar">
+                        <div id="tasks-progress-fill" class="tasks-progress-fill" style="width: 0%;"></div>
+                    </div>
+                </div>
+
+                <!-- 할 일 추가 폼 -->
+                <form id="plan-task-add-form" class="task-add-form" style="margin-top: 14px;">
+                    <div class="task-input-row">
+                        <input
+                            type="text"
+                            id="task-title-input"
+                            class="task-input"
+                            placeholder="새 세부 할 일 입력 (예: 기출문제 1회 풀기)"
+                            maxlength="120"
+                            required
+                        >
+                        <input
+                            type="date"
+                            id="task-due-date-input"
+                            class="task-date-input"
+                            title="마감일 (선택)"
+                        >
+                        <button type="submit" class="primary-button task-add-btn" id="task-add-btn">
+                            + 추가
+                        </button>
+                    </div>
+                </form>
+
+                <!-- 할 일이 없을 때 표시할 안내 -->
+                <div id="plan-tasks-empty" class="history-empty hidden" style="margin-top: 14px;">
+                    <p>💡 아직 등록된 세부 할 일이 없습니다. 위 입력창에서 할 일을 추가해보세요.</p>
+                </div>
+
+                <!-- 할 일 목록 리스트 -->
+                <div id="plan-tasks-list" class="plan-tasks-list" style="margin-top: 14px;">
+                    <!-- 동적으로 렌더링됩니다 -->
+                </div>
+
+            </section>
+
+            <!-- 계획 수정 이력 (T06-C08) -->
+            <section class="drawer-card" id="history-section" style="margin-top: 20px;">
+
+                <div class="section-title">
+                    <div>
+                        <span class="drawer-step-icon">📜</span>
+                        <div>
+                            <h2>계획 수정 이력</h2>
+                            <p class="section-description">
+                                계획을 수정해도 고치기 전 계획이 별도 표에 분리되어 그대로 보존됩니다.
+                            </p>
+                        </div>
+                    </div>
+                    <span id="history-count-badge" class="history-count-badge">이력 0건</span>
+                </div>
+
+                <!-- 수정 이력이 없을 때 표시할 안내 -->
+                <div id="history-empty" class="history-empty">
+                    <p>💡 아직 수정 이력이 없습니다. 현재 계획을 수정하면 고치기 전 계획이 이곳에 자동으로 기록·보존됩니다.</p>
+                </div>
+
+                <!-- 수정 이력 표 (별도 표에 분리 저장된 수정 전 계획 목록) -->
+                <div id="history-table-wrapper" class="history-table-wrapper hidden">
+                    <table class="history-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 14%;">버전</th>
+                                <th style="width: 17%;">수정 시각</th>
+                                <th style="width: 21%;">고치기 전 계획명</th>
+                                <th style="width: 10%;">우선순위</th>
+                                <th style="width: 18%;">기간</th>
+                                <th style="width: 10%;">예상 시간</th>
+                                <th style="width: 10%;">복원</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-list-body">
+                            <!-- 수정 이력 행들이 여기에 동적으로 렌더링됩니다 -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="notice" style="margin-top: 16px;">
+                    💡 <strong>T06-C08 충족:</strong> 계획을 고쳐도 기존 계획을 덮어쓰지 않고, 고치기 전 계획을 별도의 표(DB 테이블 및 화면)에 분리 저장하여 계획 ID를 유지한 채 안전하게 보존합니다.
+                </div>
+
+            </section>
+        </div>
+
+    </aside>
+
+
+    <!-- 실행 기록 (DO) -->
+    <section class="card hidden" id="execution-section">
+
+        <div class="section-title">
+            <div>
+                <span class="step do-step">DO</span>
+                <div>
+                    <h2>실행 기록</h2>
+                    <p class="section-description">
+                        계획과 별개로 실제로 언제 시작해서 얼마나 걸렸고 어디서 막혔는지를 남깁니다.
+                    </p>
+                </div>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <span id="target-plan-badge" class="target-plan-badge">선택된 계획 없음</span>
+                <button type="button" class="secondary-button" id="btn-switch-to-plan" style="padding: 4px 10px; font-size: 12px;" title="다른 계획을 선택하려면 PLAN 탭으로 이동">
+                    📋 계획 목록에서 선택
+                </button>
+                <span id="execution-count-badge" class="history-count-badge">실행 0건</span>
+            </div>
+        </div>
+
+        <!-- 실행 기록 작성 폼 -->
+        <form id="execution-form" class="execution-form">
+
+            <div class="form-row">
+                <div class="form-group flex-grow">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px;">
+                        <label for="exec-start-time" style="margin-bottom: 0;">시작 시각</label>
+                        <div style="display: flex; gap: 6px;">
+                            <button type="button" class="quick-time-btn" id="btn-zero-start" title="분을 :00 정각으로 설정">:00 정각</button>
+                            <button type="button" class="quick-time-btn" id="btn-now-start" title="현재 시각으로 입력">🕒 지금 시각</button>
+                        </div>
+                    </div>
+                    <input type="datetime-local" id="exec-start-time" step="60" required>
+                </div>
+
+                <div class="form-group flex-grow">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px;">
+                        <label for="exec-end-time" style="margin-bottom: 0;">끝 시각</label>
+                        <div style="display: flex; gap: 6px;">
+                            <button type="button" class="quick-time-btn" id="btn-zero-end" title="분을 :00 정각으로 설정">:00 정각</button>
+                            <button type="button" class="quick-time-btn" id="btn-now-end" title="현재 시각으로 입력">🕒 지금 시각</button>
+                        </div>
+                    </div>
+                    <input type="datetime-local" id="exec-end-time" step="60" required>
+                </div>
+
+                <div class="form-group" style="width: 170px;">
+                    <label for="exec-actual-minutes">실제로 걸린 시간</label>
+                    <div class="time-input">
+                        <input type="number" id="exec-actual-minutes" min="1" placeholder="60" required>
+                        <span>분</span>
+                    </div>
+                    <div class="help" style="font-size: 11px;">시작/끝 시각 선택 시 자동 계산</div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="exec-blocker-reason">어디서 막혔나요? (막혔던 이유)</label>
+                <textarea
+                    id="exec-blocker-reason"
+                    placeholder="예: 특정 라이브러리 설치 오류로 30분 지체됨, 알고리즘 개념 이해에 예상보다 많은 시간 소요 등 (없으면 빈칸 가능)"
+                    rows="2"
+                    style="min-height: 60px;"
+                ></textarea>
+                <div class="help">
+                    진행 중 막히거나 지체되었던 요인을 기록하면 돌아보기(See)에서 종합 분석할 수 있습니다.
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="exec-memo">실행 내용 / 메모 (선택)</label>
+                <input
+                    type="text"
+                    id="exec-memo"
+                    placeholder="예: 1단원 핵심 개념 학습 및 예제 5문제 풀이 완료"
+                    maxlength="200"
+                >
+            </div>
+
+            <div class="execution-form-footer">
+                <label class="checkbox-container">
+                    <input type="checkbox" id="exec-mark-completed">
+                    <span class="checkbox-label">✓ 이 실행 기록과 함께 계획을 '완료'로 처리하기</span>
+                </label>
+
+                <button type="submit" class="primary-button" id="exec-submit-btn">
+                    + 실행 기록 저장
+                </button>
+            </div>
+
+        </form>
+
+        <!-- 실행 기록 안내 문구 -->
+        <div id="execution-empty" class="history-empty" style="margin-top: 24px;">
+            <p>💡 아직 기록된 실행 내역이 없습니다. 실제로 진행한 시작/끝 시각과 소요 시간, 막혔던 이유를 기록해보세요.</p>
+        </div>
+
+        <!-- 실행 기록 표 (이전 기록이 사라지지 않고 모두 누적 보존됨) -->
+        <div id="execution-table-wrapper" class="history-table-wrapper hidden" style="margin-top: 24px;">
+            <div class="execution-table-header">
+                <span><strong>실행 누적 이력</strong> (총 <span id="exec-history-count">0</span>회 · 누적 소요: <span id="exec-total-minutes">0분</span>)</span>
+                <span class="notice-badge">💡 이전 실행 기록이 사라지지 않고 누적 보존됩니다</span>
+            </div>
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th style="width: 10%;">회차</th>
+                        <th style="width: 28%;">실행 시각 (시작 ~ 끝)</th>
+                        <th style="width: 14%;">실소요 시간</th>
+                        <th style="width: 25%;">막혔던 이유</th>
+                        <th style="width: 15%;">실행 내용 / 메모</th>
+                        <th style="width: 8%;">삭제</th>
+                    </tr>
+                </thead>
+                <tbody id="execution-list-body">
+                    <!-- 실행 기록 행들이 여기에 동적으로 렌더링됩니다 -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="notice" style="margin-top: 16px;">
+            💡 <strong>실행 분리 보존:</strong> 실행 기록(Do)은 계획(Plan)을 덮어쓰지 않고 독립적으로 저장되며, 실행 기록을 새로 추가해도 이전의 기록들이 사라지지 않고 모두 안전하게 누적 보존됩니다.
+        </div>
+
+    </section>
+
+
+    <!-- 돌아보기 (SEE) -->
+    <section class="card" id="see-section">
+
+        <div class="section-title">
+            <div>
+                <span class="step see-step">SEE</span>
+                <div>
+                    <h2>돌아보기</h2>
+                    <p class="section-description">
+                        계획(Plan)과 실제 실행(Do)을 비교하고, 완료 성과와 막혔던 이유를 분석하여 다음 계획으로 연결합니다.
+                    </p>
+                </div>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <button type="button" class="secondary-button" id="see-export-btn" title="내 계획 및 기록 전체를 단일 파일로 내보내기">
+                    📥 자료 내보내기
+                </button>
+                <button type="button" class="secondary-button" id="see-refresh-btn" title="돌아보기 데이터 새로고침">
+                    🔄 새로고침
+                </button>
+            </div>
+        </div>
+
+        <!-- 기간별 모아보기 툴바 (첫 행동: 기간별 모아보기) -->
+        <div class="see-period-toolbar">
+            <div class="see-period-tabs">
+                <button type="button" class="period-tab-btn active" data-period="all">전체 기간</button>
+                <button type="button" class="period-tab-btn" data-period="today">오늘</button>
+                <button type="button" class="period-tab-btn" data-period="week">이번 주</button>
+                <button type="button" class="period-tab-btn" data-period="month">이번 달</button>
+            </div>
+            <div class="see-period-range-info">
+                <span id="see-period-range-text" class="see-period-range-text">전체 기간 집계</span>
+                <span class="click-hint-badge">💡 집계 숫자를 누르면 해당 근거 기록으로 바로 이동합니다</span>
+            </div>
+        </div>
+
+        <!-- 돌아보기 KPI 대시보드 그리드 (첫 행동: 계획수·완료수·지연수·막힘수 & 예상/실제 시간 집계 및 클릭 시 근거 추적) -->
+        <div class="see-kpi-grid">
+            <div class="see-kpi-card clickable" id="kpi-card-total" title="클릭 시 전체 계획 목록으로 이동">
+                <div class="kpi-card-top">
+                    <span class="see-kpi-label">📋 계획 수</span>
+                    <span class="trace-arrow">이동 ↗</span>
+                </div>
+                <div class="see-kpi-value"><span id="see-total-plans-count">0</span><span class="unit">개</span></div>
+                <div class="see-kpi-subtext">전체 계획 목록 보기</div>
+            </div>
+
+            <div class="see-kpi-card highlight-card clickable" id="kpi-card-completed" title="클릭 시 완료된 계획 목록으로 이동">
+                <div class="kpi-card-top">
+                    <span class="see-kpi-label">🎯 완료 수</span>
+                    <span class="trace-arrow">이동 ↗</span>
+                </div>
+                <div class="see-kpi-value"><span id="see-completed-count">0</span><span class="unit">개</span></div>
+                <div class="see-kpi-subtext" id="see-completed-sub">완료 근거 기록 목록 보기</div>
+            </div>
+
+            <div class="see-kpi-card delayed-card clickable" id="kpi-card-delayed" title="클릭 시 지연된 계획 목록으로 이동">
+                <div class="kpi-card-top">
+                    <span class="see-kpi-label">⏰ 지연 수</span>
+                    <span class="trace-arrow">이동 ↗</span>
+                </div>
+                <div class="see-kpi-value"><span id="see-delayed-count">0</span><span class="unit">개</span></div>
+                <div class="see-kpi-subtext" id="see-delayed-sub">마감일 초과 미완료 (T06-C30)</div>
+            </div>
+
+            <div class="see-kpi-card blocked-card clickable" id="kpi-card-blocked" title="클릭 시 막혔던 이유 기록으로 이동">
+                <div class="kpi-card-top">
+                    <span class="see-kpi-label">🚧 막힘 수</span>
+                    <span class="trace-arrow">이동 ↗</span>
+                </div>
+                <div class="see-kpi-value"><span id="see-blocked-count">0</span><span class="unit">건</span></div>
+                <div class="see-kpi-subtext">병목 사유 기록 보기</div>
+            </div>
+
+            <div class="see-kpi-card">
+                <div class="see-kpi-label">📈 목표 달성률</div>
+                <div class="see-kpi-value"><span id="see-completion-rate">0</span><span class="unit">%</span></div>
+                <div class="see-progress-bar">
+                    <div class="see-progress-fill" id="see-progress-fill" style="width: 0%;"></div>
+                </div>
+            </div>
+
+            <div class="see-kpi-card clickable" id="kpi-card-time" title="클릭 시 계획 vs 실제 실행 비교표로 이동">
+                <div class="kpi-card-top">
+                    <span class="see-kpi-label">⏱ 시간 분석 (예상 vs 실제)</span>
+                    <span class="trace-arrow">이동 ↗</span>
+                </div>
+                <div class="see-kpi-value" style="font-size: 17px;" id="see-time-summary">예상 0분 / 실제 0분</div>
+                <div class="see-kpi-subtext" id="see-time-diff">계획 대비 실제 차이: 0분</div>
+            </div>
+        </div>
+
+        <!-- 💡 첫 행동 3: 돌아보기에서 다음 계획으로 넘길 한 줄을 정합니다 (See → Plan 연결) -->
+        <div class="see-next-action-box" id="see-next-action-box" style="margin-top: 24px;">
+            <div class="see-subtitle">
+                <div>
+                    <span>💡 돌아보기에서 다음 계획으로 넘길 한 줄 정하기</span>
+                    <p class="help-text" style="margin-top: 4px;">
+                        예상과 실제의 차이 및 막혔던 이유를 분석하고, 다음 계획에 반영할 <strong>고칠 점 한 가지</strong>를 정해 넘깁니다.
+                    </p>
+                </div>
+                <span class="action-lead-badge">See → Next Plan</span>
+            </div>
+            <div class="next-action-card-body">
+                <div class="action-quick-select" id="action-quick-select-wrap">
+                    <label for="action-blocker-select">🚧 기록된 막힘 사유에서 불러오기:</label>
+                    <select id="action-blocker-select">
+                        <option value="">-- 막혔던 이유 목록에서 선택 (클릭 시 자동 입력) --</option>
+                    </select>
+                </div>
+                <div class="action-input-row">
+                    <input
+                        type="text"
+                        id="next-action-input"
+                        placeholder="다음 계획에서 개선할 고칠 점 1가지를 적어주세요 (예: 구현 전 공식 문서 30분 먼저 정독하기)"
+                        maxlength="120"
+                    >
+                    <button type="button" class="primary-button" id="btn-transfer-to-plan">
+                        🚀 다음 계획으로 넘기기
+                    </button>
+                </div>
+                <div id="next-action-recent-wrap" class="next-action-recent-wrap hidden">
+                    <span class="recent-title">최근 넘긴 고칠 점:</span>
+                    <div id="recent-action-chips" class="recent-action-chips"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 막혔던 이유(병목 요인) 모아보기 -->
+        <div class="see-blockers-box" id="see-blockers-box" style="margin-top: 24px;">
+            <div class="see-subtitle">
+                <span>🚧 어디서 막혔나요? (실행 중 발생한 병목 요인 모아보기)</span>
+                <span id="see-blocker-count-tag" class="blocker-count-tag">0건</span>
+            </div>
+            <div id="see-blockers-empty" class="see-blockers-empty">
+                💡 아직 기록된 막힘 사유가 없습니다. 실행(Do) 시 어디서 막혔는지를 기록하면 이곳에 모아져 다음 계획 수립에 참고할 수 있습니다.
+            </div>
+            <div id="see-blockers-list" class="see-blockers-list hidden">
+                <!-- 막혔던 이유 카드들이 여기에 동적으로 렌더링됩니다 -->
+            </div>
+        </div>
+
+        <!-- 계획 vs 실제 실행 비교 분석 표 (원래 계획을 덮어쓰지 않고 나란히 비교 & 근거 추적 링크) -->
+        <div class="see-table-box" id="see-table-box" style="margin-top: 24px;">
+            <div class="see-subtitle">
+                <span>📋 계획 vs 실제 실행 비교 분석 표</span>
+                <span class="help-text">완료 목표 실행 기록이 원래 계획을 덮어쓰지 않고 나란히 보존·비교됩니다.</span>
+            </div>
+            <div class="history-table-wrapper">
+                <table class="history-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 22%;">계획명</th>
+                            <th style="width: 10%;">상태</th>
+                            <th style="width: 15%;">계획 예상 시간</th>
+                            <th style="width: 16%;">실제 총 소요 시간</th>
+                            <th style="width: 13%;">시간 차이</th>
+                            <th style="width: 14%;">완료 일시</th>
+                            <th style="width: 10%;">근거 추적</th>
+                        </tr>
+                    </thead>
+                    <tbody id="see-table-body">
+                        <!-- 계획 vs 실행 비교 행들이 여기에 동적으로 렌더링됩니다 -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </section>
+
+
+    <!-- 데이터 상태 -->
+    <div id="status-message" class="status"></div>
+
+</div>
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+
+</body>
+</html>
