@@ -1,5 +1,10 @@
 import uuid
 import os
+import subprocess
+import shutil
+import threading
+import re
+import urllib.request
 import passkey_service
 from flask import Flask, render_template, request, jsonify, Response, session, redirect, url_for, abort
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -28,6 +33,98 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
 
+# ==============================================================================
+# Cloudflare Tunnel / 외부 접속 URL 관리 (모바일 QR 교차 인증 지원)
+# ==============================================================================
+PUBLIC_TUNNEL_URL = None
+TUNNEL_LOCK = threading.Lock()
+
+
+def get_public_base_url():
+    """스마트폰 QR 스캔 시 접속할 수 있는 외부 접속(HTTPS 터널 또는 호스트) URL을 반환합니다."""
+    global PUBLIC_TUNNEL_URL
+    if PUBLIC_TUNNEL_URL:
+        return PUBLIC_TUNNEL_URL
+
+    # 1. 환경 변수 확인
+    env_url = os.environ.get("TUNNEL_URL")
+    if env_url and env_url.startswith("http"):
+        PUBLIC_TUNNEL_URL = env_url.rstrip('/')
+        return PUBLIC_TUNNEL_URL
+
+    # 2. tunnel_url.txt 파일 확인
+    tunnel_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel_url.txt")
+    if os.path.exists(tunnel_file):
+        try:
+            with open(tunnel_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content.startswith("http"):
+                    PUBLIC_TUNNEL_URL = content.rstrip('/')
+                    return PUBLIC_TUNNEL_URL
+        except Exception:
+            pass
+
+    # 3. 요청 컨텍스트가 있으면 request.host_url
+    try:
+        if request and hasattr(request, "host_url"):
+            if "trycloudflare.com" in request.host:
+                return f"https://{request.host.split(':')[0]}"
+            return request.host_url.rstrip('/')
+    except Exception:
+        pass
+
+    return "http://localhost:5000"
+
+
+def start_cloudflared_daemon():
+    """cloudflared가 설치되어 있으면 자동으로 quick tunnel을 시작하여 모바일용 HTTPS URL을 획득합니다."""
+    global PUBLIC_TUNNEL_URL
+    cloudflared_path = shutil.which("cloudflared") or r"C:\Program Files (x86)\cloudflared\cloudflared.exe"
+    if not os.path.exists(cloudflared_path):
+        return
+
+    # 이미 유효한 터널 URL이 있고 응답하면 추가 실행하지 않음
+    current = get_public_base_url()
+    if current and "trycloudflare.com" in current:
+        try:
+            req = urllib.request.Request(current, headers={"User-Agent": "HealthCheck"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status in (200, 302, 404):
+                    return
+        except Exception:
+            pass
+
+    def _worker():
+        global PUBLIC_TUNNEL_URL
+        try:
+            cmd = [cloudflared_path, "tunnel", "--url", "http://127.0.0.1:5000"]
+            flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                creationflags=flags
+            )
+            for line in iter(proc.stdout.readline, ''):
+                match = re.search(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', line)
+                if match:
+                    found_url = match.group(1)
+                    with TUNNEL_LOCK:
+                        PUBLIC_TUNNEL_URL = found_url
+                        tunnel_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel_url.txt")
+                        with open(tunnel_file, "w", encoding="utf-8") as f:
+                            f.write(found_url + "\n")
+                    print(f"\n[Cloudflare Tunnel] 모바일 연동용 공개 URL: {found_url}\n")
+                    break
+        except Exception as e:
+            print("[Cloudflare Tunnel 실행 오류]:", e)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
 DATABASE = "database.db"
 
 
@@ -50,6 +147,19 @@ def init_db():
             sign_count INTEGER NOT NULL DEFAULT 0,
             device_name TEXT NOT NULL DEFAULT '스마트폰 / 생체인증 기기',
             created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # 스마트폰 패스키 등록용 일회용 QR 세션 테이블
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS passkey_reg_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
@@ -295,13 +405,21 @@ def api_register():
 
     now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
     pw_hash = generate_password_hash(password)
-    conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)", (username, pw_hash, now_str))
+    cur = conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)", (username, pw_hash, now_str))
+    user_id = cur.lastrowid
     conn.commit()
     conn.close()
 
+    # 회원가입 성공 시 세션 즉시 수립 (온보딩 및 다이어리 바로 이용 가능)
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user_id
+    session["username"] = username
+
     return jsonify({
         "success": True,
-        "message": "회원가입이 완료되었습니다! 로그인해 주세요."
+        "message": "회원가입이 완료되었습니다!",
+        "user": {"id": user_id, "username": username}
     }), 201
 
 
@@ -477,6 +595,225 @@ def passkey_register_verify():
         return jsonify({"success": False, "message": f"패스키 등록 실패: {str(err)}"}), 400
 
 
+# ==============================================================================
+# [Passkey Onboarding] 최초 가입 및 사이트 내 모바일 QR 생체인식 등록 엔드포인트
+# ==============================================================================
+
+@app.route("/api/auth/passkey/create-reg-qr", methods=["POST"])
+@login_required
+def create_passkey_reg_qr():
+    """로그인된 사용자가 스마트폰으로 생체인증을 등록할 수 있는 1회용 QR URL 생성"""
+    user_id = session["user_id"]
+    token = str(uuid.uuid4())
+    now_kst = get_kst_now()
+    now_str = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+    expires_str = (now_kst + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO passkey_reg_sessions (token, user_id, status, created_at, expires_at)
+        VALUES (?, ?, 'PENDING', ?, ?)
+    """, (token, user_id, now_str, expires_str))
+    conn.commit()
+    conn.close()
+
+    base_url = get_public_base_url()
+    register_url = f"{base_url}/mobile-register-passkey?token={token}"
+
+    return jsonify({
+        "success": True,
+        "token": token,
+        "register_url": register_url,
+        "expires_in": 600
+    })
+
+
+@app.route("/api/auth/passkey/reg-poll", methods=["GET"])
+def passkey_reg_poll():
+    """PC 브라우저에서 스마트폰의 지문 등록 완료 여부를 실시간 감지"""
+    token = request.args.get("token")
+    if not token:
+        return jsonify({"status": "INVALID"}), 400
+
+    conn = get_db()
+    row = conn.execute("""
+        SELECT r.*, u.username
+        FROM passkey_reg_sessions r
+        JOIN users u ON r.user_id = u.id
+        WHERE r.token = ?
+    """, (token,)).fetchone()
+    conn.close()
+
+    if not row:
+        return jsonify({"status": "NOT_FOUND"}), 404
+
+    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+    if row["expires_at"] < now_str:
+        return jsonify({"status": "EXPIRED", "message": "등록 유효시간이 만료되었습니다."})
+
+    if row["status"] == "COMPLETED":
+        return jsonify({
+            "status": "COMPLETED",
+            "message": f"🎉 {row['username']}님의 스마트폰 생체인증(패스키) 등록이 완료되었습니다!"
+        })
+
+    return jsonify({"status": "PENDING"})
+
+
+@app.route("/mobile-register-passkey")
+def mobile_register_page():
+    """스마트폰에서 QR을 찍었을 때 열리는 모바일 지문 등록 화면"""
+    token = request.args.get("token", "")
+    conn = get_db()
+    row = conn.execute("""
+        SELECT r.*, u.username
+        FROM passkey_reg_sessions r
+        JOIN users u ON r.user_id = u.id
+        WHERE r.token = ?
+    """, (token,)).fetchone()
+    conn.close()
+
+    if not row:
+        return render_template("mobile_register.html", error="유효하지 않거나 만료된 등록 링크입니다.")
+
+    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+    if row["expires_at"] < now_str:
+        return render_template("mobile_register.html", error="등록 유효시간(10분)이 만료되었습니다. 컴퓨터 화면에서 QR을 다시 띄워주세요.")
+
+    return render_template("mobile_register.html", token=token, username=row["username"], status=row["status"])
+
+
+@app.route("/api/auth/passkey/mobile-reg-options", methods=["POST"])
+def mobile_reg_options():
+    """모바일에서 지문 등록을 시작하기 위한 WebAuthn create 챌린지 생성"""
+    data = request.get_json() or {}
+    token = data.get("token")
+    if not token:
+        return jsonify({"success": False, "message": "토큰이 누락되었습니다."}), 400
+
+    conn = get_db()
+    row = conn.execute("""
+        SELECT r.*, u.username
+        FROM passkey_reg_sessions r
+        JOIN users u ON r.user_id = u.id
+        WHERE r.token = ?
+    """, (token,)).fetchone()
+
+    if not row:
+        conn.close()
+        return jsonify({"success": False, "message": "유효하지 않은 토큰입니다."}), 404
+
+    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+    if row["expires_at"] < now_str:
+        conn.close()
+        return jsonify({"success": False, "message": "등록 유효시간이 만료되었습니다."}), 400
+
+    user_id = row["user_id"]
+    username = row["username"]
+    conn.close()
+
+    challenge = passkey_service.b64url_encode(os.urandom(32))
+    session[f"passkey_reg_challenge_{token}"] = challenge
+    user_handle = passkey_service.b64url_encode(str(user_id).encode("utf-8"))
+
+    options = {
+        "challenge": challenge,
+        "rp": {
+            "name": "플랜두씨 다이어리",
+            "id": "localhost" if request.host.split(":")[0] in ["127.0.0.1", "localhost"] else request.host.split(":")[0]
+        },
+        "user": {
+            "id": user_handle,
+            "name": username,
+            "displayName": f"{username}님의 플랜두씨 계정"
+        },
+        "pubKeyCredParams": [
+            {"type": "public-key", "alg": -7},   # ES256 (P-256)
+            {"type": "public-key", "alg": -257}  # RS256
+        ],
+        "authenticatorSelection": {
+            "residentKey": "preferred",
+            "userVerification": "preferred"
+        },
+        "timeout": 60000,
+        "attestation": "none"
+    }
+    return jsonify(options)
+
+
+@app.route("/api/auth/passkey/mobile-reg-verify", methods=["POST"])
+def mobile_reg_verify():
+    """모바일에서 보낸 지문 등록 서명(attestation) 검증 및 저장"""
+    data = request.get_json() or {}
+    token = data.get("token")
+    device_name = data.get("device_name", "스마트폰 (모바일 등록)")
+    resp = data.get("response", {})
+    attestation_b64 = resp.get("attestationObject")
+    client_data_b64 = resp.get("clientDataJSON")
+
+    if not token or not attestation_b64 or not client_data_b64:
+        return jsonify({"success": False, "message": "필수 파라미터가 누락되었습니다."}), 400
+
+    expected_challenge = session.get(f"passkey_reg_challenge_{token}")
+    if not expected_challenge:
+        return jsonify({"success": False, "message": "등록 세션이 만료되었습니다. 다시 시도해 주세요."}), 400
+
+    conn = get_db()
+    row = conn.execute("""
+        SELECT r.*, u.username
+        FROM passkey_reg_sessions r
+        JOIN users u ON r.user_id = u.id
+        WHERE r.token = ?
+    """, (token,)).fetchone()
+
+    if not row or row["status"] != "PENDING":
+        conn.close()
+        return jsonify({"success": False, "message": "이미 완료되었거나 유효하지 않은 세션입니다."}), 400
+
+    try:
+        client_data_bytes = passkey_service.b64url_decode(client_data_b64)
+        client_data = json.loads(client_data_bytes.decode('utf-8'))
+        if client_data.get("type") != "webauthn.create":
+            conn.close()
+            return jsonify({"success": False, "message": "올바르지 않은 WebAuthn 요청입니다."}), 400
+
+        c_challenge = client_data.get("challenge", "").replace("-", "+").replace("_", "/").rstrip("=")
+        e_challenge = expected_challenge.replace("-", "+").replace("_", "/").rstrip("=")
+        if c_challenge != e_challenge:
+            conn.close()
+            return jsonify({"success": False, "message": "챌린지 검증에 실패했습니다."}), 400
+
+        att_bytes = passkey_service.b64url_decode(attestation_b64)
+        parsed = passkey_service.parse_attestation_object(att_bytes)
+
+        cred_id_b64 = parsed["credential_id_b64"]
+        pub_key_pem = parsed["public_key_pem"]
+        now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+
+        conn.execute("""
+            INSERT INTO passkeys (user_id, credential_id, public_key, device_name, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (row["user_id"], cred_id_b64, pub_key_pem, device_name, now_str))
+
+        conn.execute("""
+            UPDATE passkey_reg_sessions
+            SET status = 'COMPLETED'
+            WHERE token = ?
+        """, (token,))
+        conn.commit()
+        conn.close()
+
+        session.pop(f"passkey_reg_challenge_{token}", None)
+
+        return jsonify({
+            "success": True,
+            "message": f"🎉 {row['username']}님의 스마트폰 생체인증이 등록되었습니다!"
+        })
+    except Exception as err:
+        conn.close()
+        return jsonify({"success": False, "message": f"패스키 등록 실패: {str(err)}"}), 400
+
+
 @app.route("/api/auth/passkey/login-options", methods=["POST"])
 def passkey_login_options():
     """패스키 로그인 챌린지 생성"""
@@ -641,7 +978,7 @@ def qr_create():
     conn.close()
 
     # 터널 URL 우선, 없으면 request.host_url
-    base_url = "https://fixtures-choosing-integrated-concentrate.trycloudflare.com"
+    base_url = get_public_base_url()
     approve_url = f"{base_url}/mobile-approve?token={token}"
 
     return jsonify({
@@ -700,28 +1037,9 @@ def qr_poll():
 
 @app.route("/mobile-approve")
 def mobile_approve_page():
-    """스마트폰에서 QR을 찍었을 때 열리는 모바일 지문 승인 화면"""
+    """스마트폰에서 QR을 찍었을 때 열리는 모바일 지문 승인 화면 (아이디 목록 노출 차단)"""
     token = request.args.get("token", "")
-    conn = get_db()
-    # 패스키가 1개 이상 등록된 사용자만 승인 가능
-    users_with_passkeys = conn.execute("""
-        SELECT u.id, u.username, COUNT(p.id) as passkey_count
-        FROM users u
-        LEFT JOIN passkeys p ON u.id = p.user_id
-        GROUP BY u.id
-        ORDER BY u.id ASC
-    """).fetchall()
-    conn.close()
-
-    user_list = []
-    for u in users_with_passkeys:
-        user_list.append({
-            "id": u["id"],
-            "username": u["username"],
-            "has_passkey": bool(u["passkey_count"] > 0)
-        })
-
-    return render_template("mobile_approve.html", token=token, users=user_list)
+    return render_template("mobile_approve.html", token=token)
 
 
 @app.route("/api/auth/qr/approve-options", methods=["POST"])
@@ -735,7 +1053,7 @@ def qr_approve_options():
     user = conn.execute("SELECT id, username FROM users WHERE username = ?", (username,)).fetchone()
     if not user:
         conn.close()
-        return jsonify({"success": False, "message": "존재하지 않는 계정입니다."}), 404
+        return jsonify({"success": False, "message": f"'{username}' 계정을 찾을 수 없거나 등록된 패스키가 없습니다. 아이디를 확인해 주세요."}), 400
 
     # 해당 유저의 등록된 패스키 조회
     keys = conn.execute("SELECT credential_id FROM passkeys WHERE user_id = ?", (user["id"],)).fetchall()
@@ -744,7 +1062,7 @@ def qr_approve_options():
     if not keys:
         return jsonify({
             "success": False,
-            "message": f"'{username}' 계정에는 등록된 패스키 기기가 없습니다. 먼저 컴퓨터나 스마트폰에서 패스키를 등록해 주세요."
+            "message": f"'{username}' 계정을 찾을 수 없거나 등록된 패스키가 없습니다. 먼저 패스키를 등록해 주세요."
         }), 400
 
     # 챌린지 발급
@@ -757,7 +1075,7 @@ def qr_approve_options():
         "success": True,
         "challenge": challenge,
         "allowCredentials": allow_credentials,
-        "rpId": "fixtures-choosing-integrated-concentrate.trycloudflare.com" if "trycloudflare.com" in request.host else "localhost",
+        "rpId": "localhost" if request.host.split(":")[0] in ["127.0.0.1", "localhost"] else request.host.split(":")[0],
         "timeout": 60000,
         "userVerification": "required"
     })
@@ -849,7 +1167,17 @@ def qr_approve():
 @app.route("/")
 @login_required
 def index():
-    return render_template("index.html", current_user={"id": session["user_id"], "username": session["username"]})
+    user_id = session["user_id"]
+    conn = get_db()
+    passkey_count = conn.execute("SELECT COUNT(*) FROM passkeys WHERE user_id = ?", (user_id,)).fetchone()[0]
+    conn.close()
+
+    return render_template(
+        "index.html",
+        current_user={"id": user_id, "username": session["username"]},
+        has_passkeys=bool(passkey_count > 0),
+        public_base_url=get_public_base_url()
+    )
 
 
 # ==============================================================================
@@ -1944,11 +2272,13 @@ def export_all_data():
 
 if __name__ == "__main__":
     init_db()
+    start_cloudflared_daemon()
 
     print("=" * 60)
     print("플랜두씨 다이어리 2 (Plan-Do-See) - 인증 & 격리 서버 시작")
     print("기본 관리자 계정 (과제 6 샘플 데이터 연동): admin / admin1234!")
     print("접속 주소: http://127.0.0.1:5000")
+    print(f"모바일 터널 주소: {get_public_base_url()}")
     print("=" * 60)
 
     app.run(debug=True, port=5000)
