@@ -34,25 +34,19 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
 
 # ==============================================================================
-# Cloudflare Tunnel / 외부 접속 URL 관리 (모바일 QR 교차 인증 지원)
+# 터널링 / 외부 접속 URL 관리 (모바일 QR 교차 인증 및 ngrok 고정 도메인 지원)
 # ==============================================================================
 PUBLIC_TUNNEL_URL = None
 TUNNEL_LOCK = threading.Lock()
+_TUNNEL_STARTED = False
+_TUNNEL_INIT_LOCK = threading.Lock()
 
 
 def get_public_base_url():
     """스마트폰 QR 스캔 시 접속할 수 있는 외부 접속(HTTPS 터널 또는 호스트) URL을 반환합니다."""
     global PUBLIC_TUNNEL_URL
-    if PUBLIC_TUNNEL_URL:
-        return PUBLIC_TUNNEL_URL
 
-    # 1. 환경 변수 확인
-    env_url = os.environ.get("TUNNEL_URL")
-    if env_url and env_url.startswith("http"):
-        PUBLIC_TUNNEL_URL = env_url.rstrip('/')
-        return PUBLIC_TUNNEL_URL
-
-    # 2. tunnel_url.txt 파일 확인
+    # 1. tunnel_url.txt 파일 우선 확인 (ngrok 고정 도메인 등 우선 적용)
     tunnel_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel_url.txt")
     if os.path.exists(tunnel_file):
         try:
@@ -64,10 +58,19 @@ def get_public_base_url():
         except Exception:
             pass
 
+    # 2. 환경 변수 확인
+    env_url = os.environ.get("TUNNEL_URL")
+    if env_url and env_url.startswith("http"):
+        PUBLIC_TUNNEL_URL = env_url.rstrip('/')
+        return PUBLIC_TUNNEL_URL
+
+    if PUBLIC_TUNNEL_URL:
+        return PUBLIC_TUNNEL_URL
+
     # 3. 요청 컨텍스트가 있으면 request.host_url
     try:
         if request and hasattr(request, "host_url"):
-            if "trycloudflare.com" in request.host:
+            if "trycloudflare.com" in request.host or "ngrok" in request.host:
                 return f"https://{request.host.split(':')[0]}"
             return request.host_url.rstrip('/')
     except Exception:
@@ -76,15 +79,54 @@ def get_public_base_url():
     return "http://localhost:5000"
 
 
-def start_cloudflared_daemon():
-    """cloudflared가 설치되어 있으면 자동으로 quick tunnel을 시작하여 모바일용 HTTPS URL을 획득합니다."""
+def start_tunnel_daemon():
+    """터널링 데몬(ngrok 고정 도메인 또는 cloudflared)을 백그라운드에서 실행합니다."""
     global PUBLIC_TUNNEL_URL
+    current = get_public_base_url()
+
+    # 1. ngrok 고정 도메인이 설정된 경우
+    if current and "ngrok" in current:
+        ngrok_domain = current.replace("https://", "").replace("http://", "").strip()
+
+        def _ngrok_worker():
+            try:
+                from pyngrok import ngrok, conf
+                ngrok_exe = r"C:\Users\user\AppData\Local\ngrok\ngrok.exe" if os.path.exists(r"C:\Users\user\AppData\Local\ngrok\ngrok.exe") else shutil.which("ngrok")
+                if ngrok_exe:
+                    conf.get_default().ngrok_path = ngrok_exe
+
+                # 이미 열려있는 ngrok 터널이 있는지 확인
+                tunnels = ngrok.get_tunnels()
+                for t in tunnels:
+                    if ngrok_domain in t.public_url:
+                        print(f"\n[ngrok 고정 터널 이미 실행 중] {t.public_url}\n")
+                        return
+
+                print(f"\n[ngrok] 고정 도메인 연결 시도: {current} ...")
+                tunnel = ngrok.connect(5000, domain=ngrok_domain)
+                print(f"\n[ngrok 고정 터널 연결 성공!] 접속 URL: {tunnel.public_url}\n")
+            except Exception as e:
+                err_msg = str(e)
+                if "4018" in err_msg or "authentication failed" in err_msg:
+                    print("\n" + "!" * 60)
+                    print("[ngrok 인증 필요] ngrok auth 토큰 등록이 필요합니다.")
+                    print("대시보드(https://dashboard.ngrok.com/get-started/your-authtoken)에서 토큰을 확인한 후,")
+                    print("터미널에 다음 명령어를 입력해 주세요:")
+                    print(r"  & 'C:\Users\user\AppData\Local\ngrok\ngrok.exe' config add-authtoken <내토큰>")
+                    print("!" * 60 + "\n")
+                else:
+                    print(f"[ngrok 실행 오류]: {e}")
+
+        t = threading.Thread(target=_ngrok_worker, daemon=True)
+        t.start()
+        return
+
+    # 2. cloudflared 임시 터널 (ngrok이 아니고 trycloudflare일 때만)
     cloudflared_path = shutil.which("cloudflared") or r"C:\Program Files (x86)\cloudflared\cloudflared.exe"
     if not os.path.exists(cloudflared_path):
         return
 
     # 이미 유효한 터널 URL이 있고 응답하면 추가 실행하지 않음
-    current = get_public_base_url()
     if current and "trycloudflare.com" in current:
         try:
             req = urllib.request.Request(current, headers={"User-Agent": "HealthCheck"})
@@ -94,7 +136,7 @@ def start_cloudflared_daemon():
         except Exception:
             pass
 
-    def _worker():
+    def _cloudflared_worker():
         global PUBLIC_TUNNEL_URL
         try:
             cmd = [cloudflared_path, "tunnel", "--url", "http://127.0.0.1:5000"]
@@ -121,8 +163,12 @@ def start_cloudflared_daemon():
         except Exception as e:
             print("[Cloudflare Tunnel 실행 오류]:", e)
 
-    t = threading.Thread(target=_worker, daemon=True)
+    t = threading.Thread(target=_cloudflared_worker, daemon=True)
     t.start()
+
+
+# 하위 호환 별칭 유지
+start_cloudflared_daemon = start_tunnel_daemon
 
 
 DATABASE = "database.db"

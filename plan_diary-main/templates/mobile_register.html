@@ -180,7 +180,10 @@
             // 1. 서버에 등록 옵션 요청
             const optRes = await fetch('/api/auth/passkey/mobile-reg-options', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'ngrok-skip-browser-warning': 'true'
+                },
                 body: JSON.stringify({ token: regToken })
             });
             const options = await optRes.json();
@@ -199,7 +202,10 @@
             // 4. 서명 공개키 서버 전송 및 등록 완료
             const verifyRes = await fetch('/api/auth/passkey/mobile-reg-verify', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'ngrok-skip-browser-warning': 'true'
+                },
                 body: JSON.stringify({
                     token: regToken,
                     device_name: '내 스마트폰 (' + (navigator.userAgent.includes('iPhone') ? 'iPhone' : 'Android') + ')',

@@ -20,10 +20,13 @@
     <header>
         <div class="header-top-row">
             <div class="badge">PLAN → DO → SEE</div>
-            <div class="user-auth-bar" style="display: flex; align-items: center; gap: 10px;">
+            <div class="user-auth-bar" style="display: flex; align-items: center; gap: 8px;">
                 <span id="user-info-text" style="font-size: 13px; font-weight: 600; color: #2b2a28;">
                     👤 <strong>{{ current_user.username }}</strong>님
                 </span>
+                <button type="button" onclick="openPasskeyModal()" style="padding: 5px 12px; font-size: 12px; background: #2e543c; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(46,84,60,0.2);" title="스마트폰 지문(패스키) 등록 및 관리">
+                    <span>📱</span><span>패스키 등록</span>
+                </button>
                 <button type="button" class="logout-btn" id="logout-btn" onclick="handleLogout()" style="padding: 5px 12px; font-size: 12px; background: #b23a3a; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; transition: opacity 0.2s;">
                     로그아웃
                 </button>
@@ -862,7 +865,9 @@
                 // 스마트폰 등록 완료 실시간 감시 (폴링)
                 indexPasskeyPollInterval = setInterval(async () => {
                     try {
-                        const pollRes = await fetch('/api/auth/passkey/reg-poll?token=' + data.token);
+                        const pollRes = await fetch('/api/auth/passkey/reg-poll?token=' + data.token, {
+                            headers: { 'ngrok-skip-browser-warning': 'true' }
+                        });
                         const pollData = await pollRes.json();
                         if (pollData.status === 'COMPLETED') {
                             clearInterval(indexPasskeyPollInterval);

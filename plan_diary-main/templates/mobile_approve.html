@@ -214,7 +214,10 @@
             // 1. 서버에 스마트폰 지문인증용 WebAuthn Assertion 챌린지 요청
             const optRes = await fetch('/api/auth/qr/approve-options', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'ngrok-skip-browser-warning': 'true'
+                },
                 body: JSON.stringify({ token: qrToken, username: username })
             });
             const optData = await optRes.json();
@@ -238,7 +241,10 @@
             // 4. 추출된 암호학적 전자서명을 서버로 전송하여 최종 승인
             const verifyRes = await fetch('/api/auth/qr/approve', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'ngrok-skip-browser-warning': 'true'
+                },
                 body: JSON.stringify({
                     token: qrToken,
                     username: username,

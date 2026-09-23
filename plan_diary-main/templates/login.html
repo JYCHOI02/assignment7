@@ -432,7 +432,9 @@
     async function pollQrApprovalStatus() {
         if (!currentQrToken) return;
         try {
-            const res = await fetch('/api/auth/qr/poll?token=' + currentQrToken);
+            const res = await fetch('/api/auth/qr/poll?token=' + currentQrToken, {
+                headers: { 'ngrok-skip-browser-warning': 'true' }
+            });
             const data = await res.json();
 
             if (data.status === 'APPROVED') {
@@ -556,7 +558,9 @@
                     if (onboardingPollInterval) clearInterval(onboardingPollInterval);
                     onboardingPollInterval = setInterval(async () => {
                         try {
-                            const pollRes = await fetch('/api/auth/passkey/reg-poll?token=' + data.token);
+                            const pollRes = await fetch('/api/auth/passkey/reg-poll?token=' + data.token, {
+                                headers: { 'ngrok-skip-browser-warning': 'true' }
+                            });
                             const pollData = await pollRes.json();
                             if (pollData.status === 'COMPLETED') {
                                 clearInterval(onboardingPollInterval);
