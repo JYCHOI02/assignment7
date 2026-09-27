@@ -1,0 +1,14 @@
+# [T07-C113] Secret Keys & Credentials - 절대 Git 기록에 남기지 않음
+.secret_key
+*.key
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local Database & Tunnels
+*.db
+*.sqlite3
+tunnel_url.txt

@@ -1,3 +1,5 @@
+import secrets
+import logging
 import uuid
 import os
 import subprocess
@@ -26,12 +28,78 @@ def get_kst_today_str():
     return get_kst_now().strftime("%Y-%m-%d")
 
 
+# ==============================================================================
+# [T07-C113] 비밀키 관리 (브라우저 코드·배포 파일·Git 기록 어디에도 노출 금지)
+# ==============================================================================
+def get_or_create_secret_key():
+    """
+    세션 서명에 사용하는 비밀키를 동적으로 로드합니다.
+    1. 환경 변수 FLASK_SECRET_KEY 우선 확인
+    2. .gitignore에 등록된 로컬 전용 파일(.secret_key) 확인
+    3. 없을 경우 암호학적으로 안전한 256비트 난수를 생성하여 로컬 파일에 보관
+    -> Git 기록, 브라우저 코드, 배포 파일 어디에도 하드코딩되지 않음 (T07-C113)
+    """
+    env_key = os.environ.get("FLASK_SECRET_KEY")
+    if env_key:
+        return env_key
+
+    key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".secret_key")
+    if os.path.exists(key_file):
+        try:
+            with open(key_file, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+                if key:
+                    return key
+        except Exception:
+            pass
+
+    new_key = secrets.token_hex(32)
+    try:
+        with open(key_file, "w", encoding="utf-8") as f:
+            f.write(new_key)
+        if hasattr(os, "chmod") and os.name != "nt":
+            os.chmod(key_file, 0o600)
+    except Exception:
+        pass
+    return new_key
+
+
+# ==============================================================================
+# [T07-C115] 적어 둔 기록에서 토큰·세션 값 마스킹 헬퍼
+# ==============================================================================
+def mask_sensitive(value, visible_start=4, visible_end=4):
+    """토큰/세션값 등 민감 정보를 기록에 남길 때 앞/뒤 일부 제외 마스킹 (T07-C115)"""
+    if not value:
+        return ""
+    val_str = str(value)
+    if len(val_str) <= (visible_start + visible_end):
+        return "********"
+    return f"{val_str[:visible_start]}****{val_str[-visible_end:]}"
+
+
+class SensitiveDataFilter(logging.Filter):
+    """Werkzeug 및 Flask HTTP 요청 로그에서 토큰/세션 쿠키 파라미터 마스킹 (T07-C115)"""
+    def filter(self, record):
+        if record.msg and isinstance(record.msg, str):
+            record.msg = re.sub(r'([?&]token=)([^&\s]+)', lambda m: f"{m.group(1)}{mask_sensitive(m.group(2))}", record.msg)
+            record.msg = re.sub(r'(pds_session=)([^;\s]+)', lambda m: f"{m.group(1)}{mask_sensitive(m.group(2))}", record.msg)
+        return True
+
+logging.getLogger("werkzeug").addFilter(SensitiveDataFilter())
+
+
 app = Flask(__name__)
-# [T07] 보안 세션 설정 (XSS/CSRF 방어 및 세션 수명 관리)
-app.secret_key = "aleph-pds-diary-assignment7-security-key-2026"
+# [T07-C113] 브라우저/Git/배포 파일에 없는 동적 비밀키 적용
+app.secret_key = get_or_create_secret_key()
+
+# [T07-C111 & T07-C112] 보안 세션 설정
+# C111: 세션 만료 시각 및 수명 설정 (기본 30분=1800초, 환경변수 SESSION_LIFETIME으로 콘솔에서 30초 등 자유 변경 가능)
+SESSION_LIFETIME_SECONDS = int(os.environ.get("SESSION_LIFETIME", 1800))
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(seconds=SESSION_LIFETIME_SECONDS)
+# C112: 사람을 알아보는 세션 값이 주소창(URL)에 실려 다니지 않도록 HttpOnly 쿠키로만 전송
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
+app.config['SESSION_COOKIE_NAME'] = 'pds_session'
 
 # ==============================================================================
 # 터널링 / 외부 접속 URL 관리 (모바일 QR 교차 인증 및 ngrok 고정 도메인 지원)
@@ -81,7 +149,12 @@ def get_public_base_url():
 
 def start_tunnel_daemon():
     """터널링 데몬(ngrok 고정 도메인 또는 cloudflared)을 백그라운드에서 실행합니다."""
-    global PUBLIC_TUNNEL_URL
+    global PUBLIC_TUNNEL_URL, _TUNNEL_STARTED
+    with _TUNNEL_INIT_LOCK:
+        if _TUNNEL_STARTED:
+            return
+        _TUNNEL_STARTED = True
+
     current = get_public_base_url()
 
     # 1. ngrok 고정 도메인이 설정된 경우
@@ -90,30 +163,59 @@ def start_tunnel_daemon():
 
         def _ngrok_worker():
             try:
+                # 1) 로컬 ngrok web API(4040 포트)에 이미 동일 도메인의 터널이 살아있는지 직접 확인
+                #    (pyngrok.get_tunnels() 직접 호출 시 새 ngrok 프로세스가 추가 생성되어 포트가 4041로 밀리고
+                #     중복 엔드포인트 에러 ERR_NGROK_6030가 발생하는 현상 방지)
+                try:
+                    req = urllib.request.Request("http://127.0.0.1:4040/api/tunnels")
+                    with urllib.request.urlopen(req, timeout=1.5) as resp:
+                        data = json.loads(resp.read().decode('utf-8'))
+                        for t in data.get("tunnels", []):
+                            if ngrok_domain in t.get("public_url", ""):
+                                print(f"\n[ngrok 고정 터널 이미 실행 중] {t.get('public_url')}\n")
+                                return
+                except Exception:
+                    pass
+
+                # 2) 4040에 유효한 터널이 없다면, 과거 종료되지 않고 남아있는 고아 ngrok 프로세스 정리
+                #    (동일 고정 도메인에 다중 프로세스가 연결되어 발생하는 ERR_NGROK_6030 완전 방지)
+                if os.name == 'nt':
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/f", "/im", "ngrok.exe"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                    except Exception:
+                        pass
+
                 from pyngrok import ngrok, conf
-                ngrok_exe = r"C:\Users\user\AppData\Local\ngrok\ngrok.exe" if os.path.exists(r"C:\Users\user\AppData\Local\ngrok\ngrok.exe") else shutil.which("ngrok")
+                import atexit
+
+                local_ngrok = os.path.join(os.environ.get("LOCALAPPDATA", ""), "ngrok", "ngrok.exe")
+                ngrok_exe = local_ngrok if os.path.exists(local_ngrok) else shutil.which("ngrok")
                 if ngrok_exe:
                     conf.get_default().ngrok_path = ngrok_exe
-
-                # 이미 열려있는 ngrok 터널이 있는지 확인
-                tunnels = ngrok.get_tunnels()
-                for t in tunnels:
-                    if ngrok_domain in t.public_url:
-                        print(f"\n[ngrok 고정 터널 이미 실행 중] {t.public_url}\n")
-                        return
 
                 print(f"\n[ngrok] 고정 도메인 연결 시도: {current} ...")
                 tunnel = ngrok.connect(5000, domain=ngrok_domain)
                 print(f"\n[ngrok 고정 터널 연결 성공!] 접속 URL: {tunnel.public_url}\n")
+
+                # 프로세스 종료 시 백그라운드 ngrok 자동 정리
+                atexit.register(lambda: ngrok.kill())
             except Exception as e:
                 err_msg = str(e)
                 if "4018" in err_msg or "authentication failed" in err_msg:
+                    ngrok_cmd = ngrok_exe if ngrok_exe else "ngrok"
                     print("\n" + "!" * 60)
                     print("[ngrok 인증 필요] ngrok auth 토큰 등록이 필요합니다.")
                     print("대시보드(https://dashboard.ngrok.com/get-started/your-authtoken)에서 토큰을 확인한 후,")
                     print("터미널에 다음 명령어를 입력해 주세요:")
-                    print(r"  & 'C:\Users\user\AppData\Local\ngrok\ngrok.exe' config add-authtoken <내토큰>")
+                    print(f"  & '{ngrok_cmd}' config add-authtoken <내토큰>")
                     print("!" * 60 + "\n")
+                elif "6030" in err_msg or "multiple endpoints" in err_msg or "4030" in err_msg:
+                    print(f"\n[ngrok 6030/4030 오류 감지]: 다른 프로세스에서 {ngrok_domain}을 사용 중입니다.")
+                    print("기존 ngrok 프로세스를 정리 후 다시 연결합니다.\n")
                 else:
                     print(f"[ngrok 실행 오류]: {e}")
 
@@ -171,7 +273,7 @@ def start_tunnel_daemon():
 start_cloudflared_daemon = start_tunnel_daemon
 
 
-DATABASE = "database.db"
+DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database.db")
 
 
 def get_db():
@@ -210,15 +312,21 @@ def init_db():
         )
     """)
 
-    # [T07-C94~C96] 사용자(Users) 테이블 생성
+    # [T07-C94~C96 & T07-C114] 사용자(Users) 테이블 생성 (세션 버전 관리 지원)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            session_version INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         )
     """)
+    # [T07-C114] 기존 DB 파일 호환성: session_version 컬럼 부재 시 안전하게 추가
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS plans (
@@ -371,7 +479,7 @@ def init_db():
     if not admin_row:
         now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
         admin_hash = generate_password_hash("admin1234!")
-        cur = conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)", ("admin", admin_hash, now_str))
+        cur = conn.execute("INSERT INTO users (username, password_hash, session_version, created_at) VALUES (?, ?, 1, ?)", ("admin", admin_hash, now_str))
         admin_id = cur.lastrowid
     else:
         admin_id = admin_row["id"]
@@ -388,19 +496,79 @@ def init_db():
 # [T07] 보안 & 인증 헬퍼 함수
 # ==============================================================================
 
+def establish_session(user_id, username, session_version=None):
+    """
+    [T07-C111 & T07-C114] 안전한 로그인 세션 수립 및 만료 정보 기록 헬퍼
+    - 세션 만료 시각(Expires / Max-Age)을 명시적으로 기록 (T07-C111)
+    - 세션 버전(session_version)을 주입하여 비밀번호 변경/로그아웃 시 무효화 검증 지원 (T07-C114)
+    """
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user_id
+    session["username"] = username
+
+    if session_version is None:
+        conn = get_db()
+        row = conn.execute("SELECT session_version FROM users WHERE id = ?", (user_id,)).fetchone()
+        conn.close()
+        session_version = row["session_version"] if row and "session_version" in row.keys() else 1
+
+    session["session_version"] = session_version
+    now_kst = get_kst_now()
+    session["login_time"] = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+    session["expires_at"] = (now_kst + app.permanent_session_lifetime).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def login_required(f):
-    """비로그인 사용자의 접근을 차단하는 데코레이터 (T07-C97)"""
+    """
+    비로그인 사용자의 접근을 차단하는 데코레이터 (T07-C97 & T07-C114)
+    - 미인증 접근 차단 (API: 401 반환, 페이지: /login 리다이렉트)
+    - 비밀번호 변경 또는 로그아웃 시 기존 발급 세션 즉시 무효화 (T07-C114)
+    """
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if "user_id" not in session:
-            # API 요청인 경우 JSON 401 반환
             if request.path.startswith("/api/"):
                 return jsonify({
                     "error": "Unauthorized",
                     "message": "로그인이 필요한 요청입니다."
                 }), 401
-            # 페이지 접근인 경우 로그인 페이지로 강제 리다이렉트 (T07-C97)
             return redirect(url_for("login_page"))
+
+        # [T07-C111] 만료 시각(expires_at) 경과 여부 서버 측 엄격 검증
+        expires_at_str = session.get("expires_at")
+        if expires_at_str:
+            try:
+                exp_dt = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+                if get_kst_now() > exp_dt:
+                    # 세션 만료 시간 초과! 즉시 세션 파기
+                    session.clear()
+                    if request.path.startswith("/api/"):
+                        return jsonify({
+                            "error": "Unauthorized",
+                            "message": "세션 유효시간이 만료되었습니다. 다시 로그인해 주세요."
+                        }), 401
+                    return redirect(url_for("login_page"))
+            except Exception:
+                pass
+
+        # [T07-C114] 비밀번호 변경 또는 로그아웃된 이전 세션인지 실시간 검증
+        user_id = session.get("user_id")
+        sess_ver = session.get("session_version", 1)
+        conn = get_db()
+        row = conn.execute("SELECT session_version FROM users WHERE id = ?", (user_id,)).fetchone()
+        conn.close()
+
+        if not row or row["session_version"] != sess_ver:
+            # DB 세션 버전과 불일치 -> 로그아웃되었거나 비밀번호가 변경되어 파기된 세션!
+            session.clear()
+            if request.path.startswith("/api/"):
+                return jsonify({
+                    "error": "Unauthorized",
+                    "message": "비밀번호가 변경되었거나 로그아웃되어 만료된 세션입니다. 다시 로그인해 주세요."
+                }), 401
+            return redirect(url_for("login_page"))
+
         return f(*args, **kwargs)
     return decorated_function
 
@@ -415,13 +583,23 @@ def check_plan_ownership(conn, plan_id, user_id):
 
 
 # ==============================================================================
-# [T07-C94~C99] 인증 라우트 (회원가입, 로그인, 로그아웃, 상태 확인)
+# [T07-C94~C99 & T07-C111~C114] 인증 라우트 (회원가입, 로그인, 로그아웃, 비밀번호 변경, 세션 정보)
 # ==============================================================================
 
 @app.route("/login")
 def login_page():
-    # 이미 로그인된 상태라면 메인 화면으로 이동
+    # 이미 로그인된 상태라면 만료 여부 확인 후 메인 화면으로 이동
     if "user_id" in session:
+        expires_at_str = session.get("expires_at")
+        if expires_at_str:
+            try:
+                exp_dt = datetime.strptime(expires_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+                if get_kst_now() > exp_dt:
+                    # 이미 만료된 세션이면 세션 파기 후 로그인 화면 표시
+                    session.clear()
+                    return render_template("login.html")
+            except Exception:
+                pass
         return redirect(url_for("index"))
     return render_template("login.html")
 
@@ -451,16 +629,13 @@ def api_register():
 
     now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
     pw_hash = generate_password_hash(password)
-    cur = conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)", (username, pw_hash, now_str))
+    cur = conn.execute("INSERT INTO users (username, password_hash, session_version, created_at) VALUES (?, ?, 1, ?)", (username, pw_hash, now_str))
     user_id = cur.lastrowid
     conn.commit()
     conn.close()
 
     # 회원가입 성공 시 세션 즉시 수립 (온보딩 및 다이어리 바로 이용 가능)
-    session.clear()
-    session.permanent = True
-    session["user_id"] = user_id
-    session["username"] = username
+    establish_session(user_id, username, 1)
 
     return jsonify({
         "success": True,
@@ -493,11 +668,9 @@ def api_login():
 
     conn.close()
 
-    # 세션 수립 (세션 고정 공격 방지용 session.clear 후 등록)
-    session.clear()
-    session.permanent = True
-    session["user_id"] = user["id"]
-    session["username"] = user["username"]
+    # 세션 수립 (세션 고정 공격 방지 및 만료/버전 정보 주입)
+    sess_ver = user["session_version"] if "session_version" in user.keys() else 1
+    establish_session(user["id"], user["username"], sess_ver)
 
     return jsonify({
         "success": True,
@@ -511,11 +684,115 @@ def api_login():
 
 @app.route("/api/auth/logout", methods=["POST"])
 def api_logout():
-    # [T07-C96] 로그아웃 시 세션 파기
+    # [T07-C114] 로그아웃 시 session_version을 1 증가시켜 이전에 발급한 세션 쿠키를 완전 무효화
+    user_id = session.get("user_id")
+    if user_id:
+        try:
+            conn = get_db()
+            conn.execute("UPDATE users SET session_version = session_version + 1 WHERE id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    # [T07-C96] 클라이언트 세션 파기
     session.clear()
     return jsonify({
         "success": True,
         "message": "성공적으로 로그아웃되었습니다."
+    })
+
+
+@app.route("/api/auth/change-password", methods=["POST"])
+@login_required
+def api_change_password():
+    """[T07-C114] 비밀번호 변경 시 기존 발급 세션 일괄 무효화 및 새 비밀번호 저장"""
+    user_id = session["user_id"]
+    data = request.get_json() or {}
+    current_password = str(data.get("current_password", ""))
+    new_password = str(data.get("new_password", ""))
+
+    if not current_password or not new_password:
+        return jsonify({"success": False, "message": "현재 비밀번호와 새 비밀번호를 모두 입력해 주세요."}), 400
+
+    if len(new_password) < 4:
+        return jsonify({"success": False, "message": "새 비밀번호는 최소 4자 이상이어야 합니다."}), 400
+
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user or not check_password_hash(user["password_hash"], current_password):
+        conn.close()
+        return jsonify({"success": False, "message": "현재 비밀번호가 올바르지 않습니다."}), 400
+
+    new_hash = generate_password_hash(new_password)
+    # [T07-C114] session_version을 1 증가시켜 이전 비밀번호 시절 발급된 모든 세션 쿠키 무효화
+    new_version = (user["session_version"] if "session_version" in user.keys() else 1) + 1
+    conn.execute(
+        "UPDATE users SET password_hash = ?, session_version = ? WHERE id = ?",
+        (new_hash, new_version, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+    # 현재 접속 중인 브라우저의 세션 버전 갱신 (로그인 유지)
+    session["session_version"] = new_version
+
+    return jsonify({
+        "success": True,
+        "message": "비밀번호가 성공적으로 변경되었습니다. 다른 기기에 발급되었던 이전 세션은 모두 안전하게 무효화되었습니다."
+    })
+
+
+@app.route("/api/auth/session-info", methods=["GET"])
+@login_required
+def api_session_info():
+    """[T07-C111] 사람을 알아보는 세션 값의 만료 시각 및 얼마 뒤 끊기는지(남은 시간) 반환"""
+    username = session.get("username")
+    login_time = session.get("login_time", "")
+    expires_at = session.get("expires_at", "")
+
+    now_kst = get_kst_now()
+    remaining_seconds = 0
+    if expires_at:
+        try:
+            exp_dt = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+            remaining_seconds = max(0, int((exp_dt - now_kst).total_seconds()))
+        except Exception:
+            remaining_seconds = SESSION_LIFETIME_SECONDS
+    else:
+        remaining_seconds = SESSION_LIFETIME_SECONDS
+
+    mins = remaining_seconds // 60
+    secs = remaining_seconds % 60
+    hours = mins // 60
+    mins_rem = mins % 60
+
+    return jsonify({
+        "authenticated": True,
+        "username": username,
+        "login_time": login_time,
+        "expires_at": expires_at,
+        "lifetime_seconds": SESSION_LIFETIME_SECONDS,
+        "remaining_seconds": remaining_seconds,
+        "formatted_remaining": f"{hours:02d}:{mins_rem:02d}:{secs:02d}",
+        "message": f"세션 유효기간: {SESSION_LIFETIME_SECONDS}초 ({remaining_seconds}초 뒤 자동 종료)" if SESSION_LIFETIME_SECONDS < 60 else f"세션 유효기간: {SESSION_LIFETIME_SECONDS // 60}분 (약 {mins}분 뒤 자동 종료)"
+    })
+
+
+@app.route("/api/auth/set-session-expiry", methods=["POST"])
+@login_required
+def api_set_session_expiry():
+    """[T07-C111 테스트용] 현재 활성 세션의 만료 시간을 N초 뒤로 즉시 변경"""
+    data = request.get_json() or {}
+    seconds = int(data.get("seconds", 30))
+    now_kst = get_kst_now()
+    new_expires_at = (now_kst + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S")
+    session["expires_at"] = new_expires_at
+    return jsonify({
+        "success": True,
+        "message": f"세션 만료 시각이 {seconds}초 뒤({new_expires_at})로 설정되었습니다.",
+        "expires_at": new_expires_at,
+        "remaining_seconds": seconds
     })
 
 
@@ -526,7 +803,9 @@ def api_me():
             "authenticated": True,
             "user": {
                 "id": session["user_id"],
-                "username": session["username"]
+                "username": session["username"],
+                "expires_at": session.get("expires_at", ""),
+                "session_lifetime_seconds": SESSION_LIFETIME_SECONDS
             }
         })
     return jsonify({"authenticated": False, "user": None}), 401
@@ -938,11 +1217,8 @@ def passkey_login_verify():
             conn.close()
             return jsonify({"success": False, "message": "생체인증 서명 검증에 실패했습니다."}), 401
 
-        # 로그인 성공 -> 세션 수립
-        session.clear()
-        session.permanent = True
-        session["user_id"] = row["uid"]
-        session["username"] = row["username"]
+        # 로그인 성공 -> 안전한 세션 수립 (T07-C111 & C114)
+        establish_session(row["uid"], row["username"])
 
         conn.close()
         return jsonify({
@@ -1060,11 +1336,8 @@ def qr_poll():
         return jsonify({"status": "EXPIRED"})
 
     if row["status"] == "APPROVED" and row["user_id"]:
-        # 스마트폰에서 지문 인증 승인 완료 -> PC 세션 자동 수립!
-        session.clear()
-        session.permanent = True
-        session["user_id"] = row["user_id"]
-        session["username"] = row["username"]
+        # 스마트폰에서 지문 인증 승인 완료 -> PC 세션 자동 수립 (T07-C111 & C114)
+        establish_session(row["user_id"], row["username"])
 
         # 1회 사용 후 토큰 폐기 (재사용 방지)
         conn.execute("UPDATE qr_login_sessions SET status = 'CONSUMED' WHERE token = ?", (token,))
@@ -1222,7 +1495,9 @@ def index():
         "index.html",
         current_user={"id": user_id, "username": session["username"]},
         has_passkeys=bool(passkey_count > 0),
-        public_base_url=get_public_base_url()
+        public_base_url=get_public_base_url(),
+        session_expires_at=session.get("expires_at", ""),
+        session_lifetime_seconds=SESSION_LIFETIME_SECONDS
     )
 
 
@@ -2318,7 +2593,10 @@ def export_all_data():
 
 if __name__ == "__main__":
     init_db()
-    start_cloudflared_daemon()
+
+    # Werkzeug reloader 프로세스 2중 구동으로 인한 터널 중복 생성(ERR_NGROK_6030) 방지
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+        start_cloudflared_daemon()
 
     print("=" * 60)
     print("플랜두씨 다이어리 2 (Plan-Do-See) - 인증 & 격리 서버 시작")
@@ -2327,4 +2605,5 @@ if __name__ == "__main__":
     print(f"모바일 터널 주소: {get_public_base_url()}")
     print("=" * 60)
 
-    app.run(debug=True, port=5000)
+    # use_reloader=False를 적용하여 불필요한 서브프로세스 중복 및 좀비 ngrok 생성 방지
+    app.run(debug=True, use_reloader=False, port=5000)

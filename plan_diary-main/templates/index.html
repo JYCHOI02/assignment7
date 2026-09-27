@@ -20,12 +20,21 @@
     <header>
         <div class="header-top-row">
             <div class="badge">PLAN → DO → SEE</div>
-            <div class="user-auth-bar" style="display: flex; align-items: center; gap: 8px;">
+            <div class="user-auth-bar" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                 <span id="user-info-text" style="font-size: 13px; font-weight: 600; color: #2b2a28;">
                     👤 <strong>{{ current_user.username }}</strong>님
                 </span>
-                <button type="button" onclick="openPasskeyModal()" style="padding: 5px 12px; font-size: 12px; background: #2e543c; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(46,84,60,0.2);" title="스마트폰 지문(패스키) 등록 및 관리">
+                <!-- ⏱️ [T07-C111] 세션 만료 시각 및 끊김 타이머 표시 -->
+                <span id="session-timer-badge" title="세션 유효기간: 30분 (만료 후 자동 로그아웃)" style="padding: 4px 8px; font-size: 11.5px; background: #f1f5f9; color: #475569; border-radius: 6px; border: 1px solid #cbd5e1; display: inline-flex; align-items: center; gap: 4px;">
+                    <span>⏱️ 세션 만료:</span>
+                    <strong id="session-countdown-text" style="color: #b91c1c; font-family: monospace;">계산 중...</strong>
+                </span>
+                <button type="button" onclick="openPasskeyModal()" style="padding: 5px 10px; font-size: 12px; background: #2e543c; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(46,84,60,0.2);" title="스마트폰 지문(패스키) 등록 및 관리">
                     <span>📱</span><span>패스키 등록</span>
+                </button>
+                <!-- 🔑 [T07-C114] 비밀번호 변경 (이전 발급 세션 일괄 무효화) -->
+                <button type="button" onclick="openChangePasswordModal()" style="padding: 5px 10px; font-size: 12px; background: #4b5563; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.15);" title="비밀번호 변경 (변경 시 다른 기기의 이전 세션 자동 만료)">
+                    <span>🔑</span><span>비밀번호 변경</span>
                 </button>
                 <button type="button" class="logout-btn" id="logout-btn" onclick="handleLogout()" style="padding: 5px 12px; font-size: 12px; background: #b23a3a; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; transition: opacity 0.2s;">
                     로그아웃
@@ -1002,7 +1011,10 @@
     async function handleLogout() {
         if (confirm("로그아웃 하시겠습니까?")) {
             try {
-                const res = await fetch("/api/auth/logout", { method: "POST" });
+                const res = await fetch("/api/auth/logout", {
+                    method: "POST",
+                    headers: { 'ngrok-skip-browser-warning': 'true' }
+                });
                 if (res.ok) {
                     window.location.href = "/login";
                 } else {
@@ -1013,6 +1025,149 @@
             }
         }
     }
+
+    // ⏱️ [T07-C111] 세션 만료 시각 및 실시간 카운트다운 타이머
+    let sessionRemainingSeconds = 1800;
+    let sessionTimerInterval = null;
+
+    async function initSessionTimer() {
+        try {
+            const res = await fetch("/api/auth/session-info", {
+                headers: { 'ngrok-skip-browser-warning': 'true' }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                sessionRemainingSeconds = data.remaining_seconds || 1800;
+                updateSessionTimerDisplay();
+                if (sessionTimerInterval) clearInterval(sessionTimerInterval);
+                sessionTimerInterval = setInterval(async () => {
+                    sessionRemainingSeconds--;
+                    if (sessionRemainingSeconds <= 0) {
+                        clearInterval(sessionTimerInterval);
+                        // [T07-C111 & C114] 만료 즉시 서버 측 세션 확실하게 파기
+                        try {
+                            await fetch("/api/auth/logout", {
+                                method: "POST",
+                                headers: { 'ngrok-skip-browser-warning': 'true' }
+                            });
+                        } catch (e) {}
+                        alert("⏱️ 세션 유효시간이 만료되어 로그아웃되었습니다.\n다시 로그인해 주세요.");
+                        window.location.href = "/login";
+                    } else {
+                        updateSessionTimerDisplay();
+                    }
+                }, 1000);
+            }
+        } catch (e) {
+            console.error("세션 타이머 초기화 실패:", e);
+        }
+    }
+
+    // 🧪 [T07-C111 콘솔 테스트 헬퍼] 브라우저 콘솔에서 setSessionTimer(30) 호출 시 서버 세션과 타이머를 즉시 30초로 동기화
+    window.setSessionTimer = async function(seconds = 30) {
+        try {
+            const res = await fetch("/api/auth/set-session-expiry", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "ngrok-skip-browser-warning": "true"
+                },
+                body: JSON.stringify({ seconds: seconds })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                sessionRemainingSeconds = seconds;
+                updateSessionTimerDisplay();
+                console.log(`⏱️ [성공] 서버 세션 및 화면 타이머가 ${seconds}초 뒤 만료되도록 설정되었습니다!`);
+                return data;
+            } else {
+                console.error("설정 실패:", data);
+            }
+        } catch (e) {
+            console.error("세션 만료시간 변경 실패:", e);
+        }
+    };
+
+    function updateSessionTimerDisplay() {
+        const el = document.getElementById("session-countdown-text");
+        if (!el) return;
+        const h = Math.floor(sessionRemainingSeconds / 3600);
+        const m = Math.floor((sessionRemainingSeconds % 3600) / 60);
+        const s = sessionRemainingSeconds % 60;
+        const formatted = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        el.textContent = `${formatted} 뒤 끊김`;
+        const badge = document.getElementById("session-timer-badge");
+        if (badge) {
+            badge.title = `세션 유효기간: 약 ${Math.ceil(sessionRemainingSeconds / 60)}분 남음 (만료 후 자동 로그아웃)`;
+        }
+    }
+
+    // 🔑 [T07-C114] 비밀번호 변경 모달 컨트롤 및 API 연동
+    function openChangePasswordModal() {
+        document.getElementById("changePasswordModal").style.display = "flex";
+        document.getElementById("currPasswordInput").value = "";
+        document.getElementById("newPasswordInput").value = "";
+        document.getElementById("newPasswordConfirmInput").value = "";
+        document.getElementById("changePasswordMsg").textContent = "";
+    }
+
+    function closeChangePasswordModal() {
+        document.getElementById("changePasswordModal").style.display = "none";
+    }
+
+    async function submitChangePassword() {
+        const currPassword = document.getElementById("currPasswordInput").value;
+        const newPassword = document.getElementById("newPasswordInput").value;
+        const confirmPassword = document.getElementById("newPasswordConfirmInput").value;
+        const msgEl = document.getElementById("changePasswordMsg");
+
+        if (!currPassword || !newPassword) {
+            msgEl.textContent = "현재 비밀번호와 새 비밀번호를 모두 입력해 주세요.";
+            msgEl.style.color = "#dc2626";
+            return;
+        }
+
+        if (newPassword.length < 4) {
+            msgEl.textContent = "새 비밀번호는 최소 4자 이상이어야 합니다.";
+            msgEl.style.color = "#dc2626";
+            return;
+        }
+
+        if (newPassword !== confirmPassword) {
+            msgEl.textContent = "새 비밀번호 확인이 일치하지 않습니다.";
+            msgEl.style.color = "#dc2626";
+            return;
+        }
+
+        try {
+            const res = await fetch("/api/auth/change-password", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "ngrok-skip-browser-warning": "true"
+                },
+                body: JSON.stringify({
+                    current_password: currPassword,
+                    new_password: newPassword
+                })
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                alert("🎉 비밀번호가 안전하게 변경되었습니다!\n보안을 위해 다른 기기/브라우저의 이전 세션은 즉시 무효화되었습니다.");
+                closeChangePasswordModal();
+            } else {
+                msgEl.textContent = data.message || "비밀번호 변경 실패";
+                msgEl.style.color = "#dc2626";
+            }
+        } catch (err) {
+            msgEl.textContent = "네트워크 오류가 발생했습니다.";
+            msgEl.style.color = "#dc2626";
+        }
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+        initSessionTimer();
+    });
 </script>
 
 
@@ -1059,6 +1214,44 @@
         <button type="button" onclick="closePasskeyModal()" style="width: 100%; padding: 11px; background: #fafaf7; border: 1.5px solid #dcd8c8; border-radius: 8px; font-size: 13.5px; color: #63604f; cursor: pointer; font-weight: 700; transition: all 0.2s;">
             닫기 (나중에 하기)
         </button>
+    </div>
+</div>
+
+<!-- 🔑 [T07-C114] 비밀번호 변경 모달 (이전 세션 일괄 무효화) -->
+<div id="changePasswordModal" class="modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.65); z-index: 99999; align-items: center; justify-content: center; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);">
+    <div style="background: #fff; border-radius: 18px; padding: 28px 24px; max-width: 400px; width: 90vw; text-align: center; box-shadow: 0 16px 44px rgba(0,0,0,0.25); box-sizing: border-box; position: relative;">
+        <button type="button" onclick="closeChangePasswordModal()" style="position: absolute; top: 16px; right: 18px; border: none; background: transparent; font-size: 22px; cursor: pointer; color: #888; line-height: 1; padding: 4px;" title="닫기">✕</button>
+
+        <div style="font-size: 34px; margin-bottom: 6px;">🔑</div>
+        <h2 style="font-size: 19px; font-weight: 700; color: #2b2a28; margin: 0 0 6px;">비밀번호 변경</h2>
+        <p style="font-size: 12.5px; color: #64748b; line-height: 1.5; margin: 0 0 16px;">
+            비밀번호를 변경하면 <strong>다른 기기에 발급된 이전 세션이 즉시 모두 파기(무효화)</strong>되어 안전하게 보호됩니다.
+        </p>
+
+        <div style="text-align: left; display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px;">
+            <div>
+                <label style="display: block; font-size: 12px; font-weight: 600; color: #334155; margin-bottom: 4px;">현재 비밀번호</label>
+                <input type="password" id="currPasswordInput" placeholder="현재 비밀번호 입력" style="width: 100%; padding: 9px 12px; border: 1.5px solid #cbd5e1; border-radius: 8px; font-size: 13.5px; box-sizing: border-box;">
+            </div>
+            <div>
+                <label style="display: block; font-size: 12px; font-weight: 600; color: #334155; margin-bottom: 4px;">새 비밀번호 (4자 이상)</label>
+                <input type="password" id="newPasswordInput" placeholder="새 비밀번호 입력" style="width: 100%; padding: 9px 12px; border: 1.5px solid #cbd5e1; border-radius: 8px; font-size: 13.5px; box-sizing: border-box;">
+            </div>
+            <div>
+                <label style="display: block; font-size: 12px; font-weight: 600; color: #334155; margin-bottom: 4px;">새 비밀번호 확인</label>
+                <input type="password" id="newPasswordConfirmInput" placeholder="새 비밀번호 다시 입력" style="width: 100%; padding: 9px 12px; border: 1.5px solid #cbd5e1; border-radius: 8px; font-size: 13.5px; box-sizing: border-box;">
+            </div>
+            <div id="changePasswordMsg" style="font-size: 12px; font-weight: 600; min-height: 16px; text-align: center;"></div>
+        </div>
+
+        <div style="display: flex; gap: 8px;">
+            <button type="button" onclick="closeChangePasswordModal()" style="flex: 1; padding: 10px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 13px; color: #475569; font-weight: 600; cursor: pointer;">
+                취소
+            </button>
+            <button type="button" onclick="submitChangePassword()" style="flex: 1; padding: 10px; background: #2563eb; border: none; border-radius: 8px; font-size: 13px; color: #fff; font-weight: 700; cursor: pointer; box-shadow: 0 2px 6px rgba(37,99,235,0.25);">
+                변경 및 세션 갱신
+            </button>
+        </div>
     </div>
 </div>
 

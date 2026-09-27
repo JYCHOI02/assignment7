@@ -10,7 +10,13 @@ if "%TOKEN%"=="" (
     pause
     exit /b
 )
-"C:\Users\user\AppData\Local\ngrok\ngrok.exe" config add-authtoken %TOKEN%
+
+set NGROK_CMD=ngrok
+if exist "%LOCALAPPDATA%\ngrok\ngrok.exe" (
+    set NGROK_CMD="%LOCALAPPDATA%\ngrok\ngrok.exe"
+)
+
+%NGROK_CMD% config add-authtoken %TOKEN%
 echo.
 echo [완료] ngrok 토큰이 정상적으로 등록되었습니다!
 echo 이제 app.py를 실행하거나 start_ngrok.bat을 실행하시면 됩니다.
