@@ -468,6 +468,8 @@ def init_db():
         conn.execute("ALTER TABLE plans ADD COLUMN current_priority TEXT NOT NULL DEFAULT '1순위'")
     if "tags" not in columns:
         conn.execute("ALTER TABLE plans ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
+    if "plan_rule" not in columns:
+        conn.execute("ALTER TABLE plans ADD COLUMN plan_rule TEXT NOT NULL DEFAULT '자유 계획'")
 
     # next_actions user_id 추가
     cursor_na = conn.execute("PRAGMA table_info(next_actions)")
@@ -480,6 +482,8 @@ def init_db():
     hist_cols = [row["name"] for row in cursor_hist.fetchall()]
     if "tags" not in hist_cols:
         conn.execute("ALTER TABLE plan_history ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
+    if "plan_rule" not in hist_cols:
+        conn.execute("ALTER TABLE plan_history ADD COLUMN plan_rule TEXT NOT NULL DEFAULT '자유 계획'")
 
     # [T07-C94/요구사항 5] 기존 과제 6 샘플 데이터를 관리자(admin) 계정으로 마이그레이션
     admin_row = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
@@ -1791,26 +1795,28 @@ def create_plan():
                     pass
         final_priority = f"{max_num + 1}순위"
 
+    plan_rule = data.get("plan_rule", "자유 계획").strip() or "자유 계획"
+
     cursor = conn.execute("""
         INSERT INTO plans (
             user_id,
             title, original_title,
             original_priority, original_start_date, original_end_date, original_success_criteria, original_expected_minutes,
             current_priority, current_start_date, current_end_date, current_success_criteria, current_expected_minutes,
-            status, tags, created_at, updated_at
+            status, tags, plan_rule, created_at, updated_at
         ) VALUES (
             ?,
             ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            '진행중', '', ?, ?
+            '진행중', '', ?, ?, ?
         )
     """, (
         user_id,
         title, title,
         final_priority, start_date, end_date, success_criteria, expected_minutes,
         final_priority, start_date, end_date, success_criteria, expected_minutes,
-        now_str, now_str
+        plan_rule, now_str, now_str
     ))
 
     new_id = cursor.lastrowid
@@ -1883,12 +1889,14 @@ def update_plan():
     """, (plan_id,)).fetchone()
     next_ver = (last_hist["version"] + 1) if last_hist else 1
 
+    plan_rule = data.get("plan_rule", "").strip() or current_plan.get("plan_rule", "자유 계획")
+
     conn.execute("""
         INSERT INTO plan_history (
             plan_id, version, title, priority,
             start_date, end_date, success_criteria,
-            expected_minutes, status, tags, modified_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            expected_minutes, status, tags, plan_rule, modified_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         plan_id,
         next_ver,
@@ -1900,6 +1908,7 @@ def update_plan():
         current_plan["current_expected_minutes"],
         current_plan["status"],
         current_plan["tags"],
+        current_plan.get("plan_rule", "자유 계획"),
         current_plan["updated_at"]
     ))
 
@@ -1946,6 +1955,7 @@ def update_plan():
             current_end_date = ?,
             current_success_criteria = ?,
             current_expected_minutes = ?,
+            plan_rule = ?,
             updated_at = ?
         WHERE id = ? AND user_id = ?
     """, (
@@ -1955,6 +1965,7 @@ def update_plan():
         end_date,
         success_criteria,
         expected_minutes,
+        plan_rule,
         now_str,
         plan_id,
         user_id
@@ -2341,8 +2352,8 @@ def add_execution_record(plan_id):
         return jsonify({"success": False, "message": "권한이 없습니다."}), 403
 
     data = request.get_json() or {}
-    start_time = data.get("start_time", "").strip()
-    end_time = data.get("end_time", "").strip()
+    start_time = data.get("start_time", "").strip().replace("T", " ")
+    end_time = data.get("end_time", "").strip().replace("T", " ")
     blocker_reason = data.get("blocker_reason", "").strip()
     memo = data.get("memo", "").strip()
 
@@ -2350,11 +2361,17 @@ def add_execution_record(plan_id):
         conn.close()
         return jsonify({"success": False, "message": "시작 시각과 종료 시각을 모두 입력해 주세요."}), 400
 
+    def parse_dt(dt_str):
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(dt_str, fmt)
+            except ValueError:
+                pass
+        raise ValueError(f"Invalid format: {dt_str}")
+
     try:
-        t_fmt = "%Y-%m-%d %H:%M" if len(start_time) == 16 else "%Y-%m-%d %H:%M:%S"
-        t_start = datetime.strptime(start_time, t_fmt)
-        t_end_fmt = "%Y-%m-%d %H:%M" if len(end_time) == 16 else "%Y-%m-%d %H:%M:%S"
-        t_end = datetime.strptime(end_time, t_end_fmt)
+        t_start = parse_dt(start_time)
+        t_end = parse_dt(end_time)
     except ValueError:
         conn.close()
         return jsonify({"success": False, "message": "날짜 및 시간 형식이 올바르지 않습니다. (YYYY-MM-DD HH:MM)"}), 400
@@ -2443,8 +2460,14 @@ def get_see_data():
     user_id = session["user_id"]
     conn = get_db()
 
-    # 현재 로그인된 사용자의 계획만 조회
-    plans_cursor = conn.execute("SELECT * FROM plans WHERE user_id = ? ORDER BY id ASC", (user_id,))
+    # 현재 로그인된 사용자의 계획만 조회 (완료 시각 조인)
+    plans_cursor = conn.execute("""
+        SELECT p.*, c.completed_at
+        FROM plans p
+        LEFT JOIN completion_records c ON p.id = c.plan_id
+        WHERE p.user_id = ?
+        ORDER BY p.id ASC
+    """, (user_id,))
     plans = [dict(row) for row in plans_cursor.fetchall()]
 
     # 현재 사용자의 계획에 종속된 실행 기록만 조회
@@ -2475,12 +2498,22 @@ def get_see_data():
     total_expected_minutes = 0
     total_actual_minutes = 0
 
+    blockers = []
     blocked_plan_ids = set()
     for rec in execution_records:
-        total_actual_minutes += rec.get("actual_minutes", 0)
+        act_m = rec.get("actual_minutes", 0)
+        total_actual_minutes += act_m
         reason = rec.get("blocker_reason", "").strip()
         if reason:
             blocked_plan_ids.add(rec["plan_id"])
+            blockers.append({
+                "id": rec["id"],
+                "plan_id": rec["plan_id"],
+                "plan_title": rec.get("plan_title", "계획"),
+                "blocker_reason": reason,
+                "actual_minutes": act_m,
+                "created_at": rec.get("created_at", "")
+            })
 
     blocked_plans = len(blocked_plan_ids)
 
@@ -2504,15 +2537,19 @@ def get_see_data():
 
         diff_min = act_min - exp_min
         plan_stats.append({
+            "id": pid,
             "plan_id": pid,
             "title": p["title"],
             "priority": p["current_priority"],
             "status": p["status"],
             "is_delayed": is_delayed,
+            "current_expected_minutes": exp_min,
             "expected_minutes": exp_min,
+            "actual_total_minutes": act_min,
             "actual_minutes": act_min,
             "diff_minutes": diff_min,
-            "execution_count": len(p_execs)
+            "execution_count": len(p_execs),
+            "completed_at": p.get("completed_at")
         })
 
     time_diff_minutes = total_actual_minutes - total_expected_minutes
@@ -2521,6 +2558,18 @@ def get_see_data():
     conn.close()
 
     return jsonify({
+        "success": True,
+        "total_plans": total_plans,
+        "completed_count": completed_plans,
+        "delayed_count": delayed_plans,
+        "blocked_count": blocked_plans,
+        "completion_rate": completion_rate,
+        "total_expected_minutes": total_expected_minutes,
+        "total_actual_minutes": total_actual_minutes,
+        "time_difference": time_diff_minutes,
+        "blockers": blockers,
+        "plan_do_summaries": plan_stats,
+        "recent_actions": next_actions,
         "summary": {
             "total_plans": total_plans,
             "completed_plans": completed_plans,
@@ -2608,104 +2657,113 @@ def delete_plan(plan_id):
     })
 
 
-# ==============================================================================
-# [T07-C132] 5일 실사용 관찰 통계 및 합계·평균 집계 API
-# ==============================================================================
+# ==========================================================
+# 실사용 관찰 통계 및 합계·평균 집계 API (순수 실제 사용자 데이터 기반)
+# ==========================================================
 @app.route("/api/see/observation-stats", methods=["GET"])
 @login_required
 def api_observation_stats():
-    """
-    [T07-C132] 5일 실사용 관찰 통계 및 합계·평균 집계 API
-    - 관찰 지표: 계획 실행 달성률 (%) = (실제 몰입 시간 / 계획 시간) * 100
-    - 손계산과 1의 오차도 없는 정확한 계산 및 5대 예외 처리 정책 반영
-    """
-    default_days = [
-        {
-            "day_num": 1,
-            "date": "2026-09-23",
-            "rule_name": "1회 90분 집중 블록",
-            "planned_minutes": 90,
-            "actual_minutes": 72,
-            "exception_status": "정상 반영"
-        },
-        {
-            "day_num": 2,
-            "date": "2026-09-24",
-            "rule_name": "1회 90분 집중 블록",
-            "planned_minutes": 90,
-            "actual_minutes": 63,
-            "exception_status": "정상 반영 (규칙 변경 계기)"
-        },
-        {
-            "day_num": 3,
-            "date": "2026-09-25",
-            "rule_name": "50분 뽀모도로 세분화",
-            "planned_minutes": 100,
-            "actual_minutes": 95,
-            "exception_status": "규칙 변경 적용 (집중도 향상)"
-        },
-        {
-            "day_num": 4,
-            "date": "2026-09-26",
-            "rule_name": "50분 뽀모도로 세분화",
-            "planned_minutes": 100,
-            "actual_minutes": 90,
-            "exception_status": "정상 반영"
-        },
-        {
-            "day_num": 5,
-            "date": "2026-09-27",
-            "rule_name": "50분 뽀모도로 세분화",
-            "planned_minutes": 100,
-            "actual_minutes": 92,
-            "exception_status": "정상 반영"
-        }
-    ]
+    user_id = session["user_id"]
+    conn = get_db()
 
-    days_data = []
+    plans_cursor = conn.execute("""
+        SELECT id, current_start_date, current_expected_minutes, plan_rule, title
+        FROM plans
+        WHERE user_id = ?
+        ORDER BY current_start_date ASC, id ASC
+    """, (user_id,))
+    user_plans = [dict(r) for r in plans_cursor.fetchall()]
+
+    records_cursor = conn.execute("""
+        SELECT e.id, e.plan_id, e.start_time, e.actual_minutes, p.title
+        FROM execution_records e
+        JOIN plans p ON e.plan_id = p.id
+        WHERE p.user_id = ?
+        ORDER BY e.start_time ASC, e.id ASC
+    """, (user_id,))
+    user_records = [dict(r) for r in records_cursor.fetchall()]
+    conn.close()
+
+    # 날짜별 집계 맵 (YYYY-MM-DD -> {planned, actual, rules})
+    date_map = {}
+    for p in user_plans:
+        d = (p.get("current_start_date") or "").strip()
+        if d:
+            if d not in date_map:
+                date_map[d] = {"planned": 0, "actual": 0, "rules": []}
+            date_map[d]["planned"] += int(p.get("current_expected_minutes") or 0)
+            rule = (p.get("plan_rule") or "").strip()
+            if rule and rule not in date_map[d]["rules"]:
+                date_map[d]["rules"].append(rule)
+
+    plan_rule_by_id = {p["id"]: (p.get("plan_rule") or "").strip() for p in user_plans}
+
+    for r in user_records:
+        st = (r.get("start_time") or "").strip()[:10]
+        if st:
+            if st not in date_map:
+                date_map[st] = {"planned": 0, "actual": 0, "rules": []}
+            date_map[st]["actual"] += int(r.get("actual_minutes") or 0)
+            pid = r.get("plan_id")
+            p_rule = plan_rule_by_id.get(pid, "")
+            if p_rule and p_rule not in date_map[st]["rules"]:
+                date_map[st]["rules"].append(p_rule)
+
+    real_days_data = []
     total_planned = 0
     total_actual = 0
     rates_sum = 0.0
 
-    for d in default_days:
-        p_min = d["planned_minutes"]
-        a_min = d["actual_minutes"]
-        total_planned += p_min
-        total_actual += a_min
+    if date_map:
+        sorted_dates = sorted(date_map.keys())
+        for idx, d_str in enumerate(sorted_dates, 1):
+            info = date_map[d_str]
+            p_min = info["planned"]
+            a_min = info["actual"]
+            total_planned += p_min
+            total_actual += a_min
 
-        # 결측치 정책: 계획 또는 실행 시간이 없거나 0인 경우 달성률 0.0%
-        if p_min > 0:
-            rate = round((a_min / p_min * 100), 1)
-        else:
-            rate = 0.0
+            if p_min > 0:
+                rate = round((a_min / p_min * 100), 1)
+            else:
+                rate = 0.0
+            rates_sum += rate
 
-        rates_sum += rate
+            if p_min == 0 and a_min > 0:
+                status_text = "무계획 실행 (0분 계획)"
+            elif p_min > 0 and a_min == 0:
+                status_text = "결측치 (미실행 0분)"
+            elif rate >= 300.0:
+                status_text = "이상치 경고 (300% 초과)"
+            else:
+                status_text = "정상 반영"
 
-        days_data.append({
-            "day_num": d["day_num"],
-            "date": d["date"],
-            "rule_name": d["rule_name"],
-            "planned_minutes": p_min,
-            "actual_minutes": a_min,
-            "achievement_rate": rate,
-            "exception_status": d["exception_status"]
-        })
+            rule_name = ", ".join(info["rules"]) if info["rules"] else "자유 계획"
 
-    # 전체 합계 계산 (손계산 일치: 480분, 412분 -> 85.8%)
+            real_days_data.append({
+                "day_num": idx,
+                "date": d_str,
+                "rule_name": rule_name,
+                "planned_minutes": p_min,
+                "actual_minutes": a_min,
+                "achievement_rate": rate,
+                "exception_status": status_text
+            })
+
+    cnt = len(real_days_data)
     total_rate = round((total_actual / total_planned * 100), 1) if total_planned > 0 else 0.0
-
-    # 산술 평균 계산 (오차 0 검증: 96.0분, 82.4분 -> 85.4%)
-    avg_planned = round(total_planned / len(days_data), 1)
-    avg_actual = round(total_actual / len(days_data), 1)
-    avg_rate = round(rates_sum / len(days_data), 1)
+    avg_planned = round(total_planned / cnt, 1) if cnt > 0 else 0.0
+    avg_actual = round(total_actual / cnt, 1) if cnt > 0 else 0.0
+    avg_rate = round(rates_sum / cnt, 1) if cnt > 0 else 0.0
 
     return jsonify({
         "success": True,
+        "days_count": cnt,
         "question": "일일 계획 집중 시간 대비 실제 몰입 실행 시간 달성률은 얼마인가?",
         "metric": "계획 실행 달성률",
         "unit": "%",
         "calculation_formula": "(실제 몰입 시간(분) / 계획 시간(분)) * 100",
-        "days": days_data,
+        "days": real_days_data,
         "totals": {
             "planned_minutes": total_planned,
             "actual_minutes": total_actual,
@@ -2715,19 +2773,6 @@ def api_observation_stats():
             "planned_minutes": avg_planned,
             "actual_minutes": avg_actual,
             "achievement_rate": avg_rate
-        },
-        "exception_rules": {
-            "missing_value": "결측치: 미입력 일자는 0분 처리 (통계 연속성 유지)",
-            "duplicate_value": "중복값: 최신 기록 덮어쓰기 정책 적용",
-            "outlier": "이상치: 300% 초과 등 비정상 수치 시 경고 뱃지 표시 및 원시 데이터 그대로 반영",
-            "rounding": "반올림: 소수점 둘째 자리에서 반올림하여 첫째 자리까지 표기 (Math.round)",
-            "week_start": "주 시작 요일: 서울 표준시(KST) 기준 월요일(Monday) 설정"
-        },
-        "rule_change_event": {
-            "event_time": "2026-09-24 21:30 KST (2일차 직후, 3일차 직전)",
-            "reason": "1~2일차 관찰 결과 90분 집중 블록은 후반부 피로도로 집중 몰입 시간이 급감함",
-            "changed_rule": "1회 계획 단위를 90분에서 50분 단위 뽀모도로 방식으로 세분화",
-            "consistency_proof": "규칙 변경 전(1~2일차)과 후(3~5일차)에 완전히 동일한 지표(%), 단위, 계산 규칙 적용"
         }
     })
 

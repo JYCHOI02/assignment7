@@ -31,6 +31,10 @@ const planTimeUnitLabel = document.getElementById("plan-time-unit-label");
 const planTimeConvertHint = document.getElementById("plan-time-convert-hint");
 let planTimeUnit = "min"; // "min" 또는 "hour"
 const tagsInput = document.getElementById("tags");
+const planRuleInput = document.getElementById("plan-rule");
+const btnRule90 = document.getElementById("btn-rule-90");
+const btnRule50 = document.getElementById("btn-rule-50");
+const btnRuleFree = document.getElementById("btn-rule-free");
 
 const submitButton = document.getElementById("submit-button");
 const cancelButton = document.getElementById("cancel-button");
@@ -1608,6 +1612,7 @@ function showEditMode() {
     }
     updatePlanTimeHint();
     if (tagsInput) tagsInput.value = currentPlan.tags || "";
+    if (planRuleInput) planRuleInput.value = currentPlan.plan_rule || "자유 계획";
 
     formSection.scrollIntoView({ behavior: "smooth" });
 }
@@ -1634,6 +1639,33 @@ endDateInput.addEventListener("change", function() {
     }
 });
 
+// 퀵 규칙 버튼 바인딩
+if (btnRule90) {
+    btnRule90.addEventListener("click", () => {
+        if (planRuleInput) planRuleInput.value = "1회 90분 집중 블록";
+        if (expectedMinutesInput) {
+            setPlanTimeUnit("min");
+            expectedMinutesInput.value = 90;
+            updatePlanTimeHint();
+        }
+    });
+}
+if (btnRule50) {
+    btnRule50.addEventListener("click", () => {
+        if (planRuleInput) planRuleInput.value = "50분 뽀모도로 세분화";
+        if (expectedMinutesInput) {
+            setPlanTimeUnit("min");
+            expectedMinutesInput.value = 50;
+            updatePlanTimeHint();
+        }
+    });
+}
+if (btnRuleFree) {
+    btnRuleFree.addEventListener("click", () => {
+        if (planRuleInput) planRuleInput.value = "자유 계획";
+    });
+}
+
 // 계획 저장 / 수정 전송
 form.addEventListener("submit", async function(event) {
     event.preventDefault();
@@ -1650,7 +1682,8 @@ form.addEventListener("submit", async function(event) {
         end_date: endDateInput.value,
         success_criteria: successCriteriaInput.value.trim(),
         expected_minutes: finalExpectedMinutes,
-        tags: tagsInput ? tagsInput.value.trim() : ""
+        tags: tagsInput ? tagsInput.value.trim() : "",
+        plan_rule: planRuleInput ? planRuleInput.value.trim() : "자유 계획"
     };
 
     if (!planData.title) {
@@ -1712,6 +1745,7 @@ form.addEventListener("submit", async function(event) {
 
         editing = false;
         await loadPlans();
+        if (window.loadObservationStats) window.loadObservationStats();
 
     } catch (error) {
         console.error(error);
@@ -1744,6 +1778,7 @@ async function deletePlan(id, title) {
         }
 
         await loadPlans();
+        if (window.loadObservationStats) window.loadObservationStats();
 
         // 삭제 후 남은 계획들의 우선순위를 1순위, 2순위...로 재정렬 저장
         if (allPlans.length > 0) {
@@ -2064,8 +2099,8 @@ async function handleExecutionSubmit(event, confirmedOverlap = false) {
         return;
     }
 
-    const startTime = execStartTimeInput.value;
-    const endTime = execEndTimeInput.value;
+    const startTime = (execStartTimeInput.value || "").replace("T", " ");
+    const endTime = (execEndTimeInput.value || "").replace("T", " ");
     let actualMinutes = 0;
     const rawActual = parseFloat(execActualMinutesInput.value);
     if (!isNaN(rawActual) && rawActual > 0) {
@@ -2087,7 +2122,7 @@ async function handleExecutionSubmit(event, confirmedOverlap = false) {
 
     // 1. 완전 중복 검사 (시작 시각과 끝 시각이 동일한 경우) -> 엄격 차단
     const isExactDuplicate = currentPlanExecutions && currentPlanExecutions.some(item =>
-        item.start_time === startTime && item.end_time === endTime
+        (item.start_time || "").replace("T", " ") === startTime && (item.end_time || "").replace("T", " ") === endTime
     );
 
     if (isExactDuplicate) {
@@ -2100,9 +2135,11 @@ async function handleExecutionSubmit(event, confirmedOverlap = false) {
 
     // 2. 시간대 겹침 검사 (동일 계획 내 겹침 확인) -> 옵션 B: 경고 확인창(confirm) 띄우기
     if (!confirmedOverlap && currentPlanExecutions) {
-        const overlapping = currentPlanExecutions.filter(item =>
-            item.start_time < endTime && item.end_time > startTime
-        );
+        const overlapping = currentPlanExecutions.filter(item => {
+            const itemStart = (item.start_time || "").replace("T", " ");
+            const itemEnd = (item.end_time || "").replace("T", " ");
+            return itemStart < endTime && itemEnd > startTime;
+        });
 
         if (overlapping.length > 0) {
             const overlapLines = overlapping.map(item =>
@@ -2196,6 +2233,7 @@ async function handleExecutionSubmit(event, confirmedOverlap = false) {
         await loadPlans();
         await loadPlanExecutions(selectedPlanId);
         await loadSeeData();
+        if (window.loadObservationStats) window.loadObservationStats();
 
     } catch (error) {
         console.error(error);
@@ -2921,7 +2959,7 @@ window.submitDeleteAccount = async function(event) {
 };
 
 // ==========================================================
-// 📊 [T07-C132] 5일 실사용 관찰 통계 컴포넌트 렌더링
+// 📊 실사용 관찰 통계 컴포넌트 렌더링 (순수 실제 데이터 기반)
 // ==========================================================
 window.loadObservationStats = async function() {
     const tbody = document.getElementById("obs-table-body");
@@ -2933,7 +2971,7 @@ window.loadObservationStats = async function() {
         });
         if (!res.ok) return;
         const data = await res.json();
-        if (!data || !data.days) return;
+        if (!data) return;
 
         // 요약 카드 갱신
         const tot = data.totals || {};
@@ -2972,24 +3010,28 @@ window.loadObservationStats = async function() {
         if (footAvgActual) footAvgActual.textContent = (avg.actual_minutes || 0) + "분";
         if (footAvgRate) footAvgRate.textContent = (avg.achievement_rate || 0) + "%";
 
-        // 5일 테이블 렌더링
+        // 테이블 렌더링
         tbody.innerHTML = "";
-        data.days.forEach(d => {
+        const days = data.days || [];
+        if (days.length === 0) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `<td colspan="7" style="padding: 24px; color: #94a3b8; text-align: center;">아직 기록된 실사용 관찰 데이터가 없습니다. PLAN(계획)과 DO(실행)를 기록해 보세요.</td>`;
+            tbody.appendChild(tr);
+            return;
+        }
+
+        days.forEach(d => {
             const tr = document.createElement("tr");
             tr.style.borderBottom = "1px solid #f1f5f9";
 
             const rate = d.achievement_rate;
             let rateBadge = `<span style="font-weight: 700; color: ${rate >= 90 ? '#15803d' : (rate >= 75 ? '#2563eb' : '#ea580c')};">${rate}%</span>`;
-
             let statusBadge = `<span style="font-size: 11.5px; padding: 2px 6px; border-radius: 4px; background: #f1f5f9; color: #475569;">${escapeHtml(d.exception_status)}</span>`;
-            if (d.day_num === 3) {
-                statusBadge = `<span style="font-size: 11.5px; padding: 2px 6px; border-radius: 4px; background: #eff6ff; color: #1d4ed8; font-weight: 600;">🔄 규칙 변경 적용</span>`;
-            }
 
             tr.innerHTML = `
                 <td style="padding: 10px 8px; font-weight: 600;">${d.day_num}일차</td>
                 <td style="padding: 10px 8px; font-family: monospace;">${escapeHtml(d.date)}</td>
-                <td style="padding: 10px 8px; color: #475569;">${escapeHtml(d.rule_name)}</td>
+                <td style="padding: 10px 8px; color: #334155; font-weight: 600;">${escapeHtml(d.rule_name)}</td>
                 <td style="padding: 10px 8px;">${d.planned_minutes}분</td>
                 <td style="padding: 10px 8px; font-weight: 600;">${d.actual_minutes}분</td>
                 <td style="padding: 10px 8px;">${rateBadge}</td>
@@ -2999,11 +3041,11 @@ window.loadObservationStats = async function() {
         });
 
     } catch (err) {
-        console.error("5일 관찰 통계 로드 오류:", err);
+        console.error("관찰 통계 로드 오류:", err);
     }
 };
 
-// 페이지 초기 로드 시 5일 관찰 통계 데이터 자동 로드
+// 페이지 초기 로드 시 관찰 통계 데이터 자동 로드
 document.addEventListener("DOMContentLoaded", () => {
     loadObservationStats();
 });

@@ -36,10 +36,6 @@
                 <button type="button" onclick="openChangePasswordModal()" style="padding: 5px 10px; font-size: 12px; background: #4b5563; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.15);" title="비밀번호 변경 (변경 시 다른 기기의 이전 세션 자동 만료)">
                     <span>🔑</span><span>비밀번호 변경</span>
                 </button>
-                <!-- 📖 [T07 남길 것 01] 인증 구현 설명서 모달 -->
-                <button type="button" onclick="openAuthDocModal()" style="padding: 5px 10px; font-size: 12px; background: #1e40af; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(30,64,175,0.2);" title="인증 구현 설명서 (6대 항목 및 검증 명세)">
-                    <span>📖</span><span>인증 구현 설명서</span>
-                </button>
                 <!-- 🗑️ [T07-C134] 회원 탈퇴 및 데이터 삭제 -->
                 <button type="button" onclick="openDeleteAccountModal()" style="padding: 5px 10px; font-size: 12px; background: #991b1b; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(153,27,27,0.2);" title="회원 탈퇴 및 모든 데이터 영구 삭제">
                     <span>🗑️</span><span>회원 탈퇴</span>
@@ -197,6 +193,27 @@
                 </div>
             </div>
 
+
+            <div class="form-group">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <label for="plan-rule" style="margin-bottom: 0;">계획 수립 규칙 (시간 관리 방식)</label>
+                    <div style="display: flex; gap: 6px;">
+                        <button type="button" class="quick-rule-btn" id="btn-rule-90" title="90분 블록 선택" style="font-size: 11px; padding: 2px 7px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f8fafc; cursor: pointer;">⚡ 90분 블록</button>
+                        <button type="button" class="quick-rule-btn" id="btn-rule-50" title="50분 뽀모도로 선택" style="font-size: 11px; padding: 2px 7px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f8fafc; cursor: pointer;">🍅 50분 뽀모도로</button>
+                        <button type="button" class="quick-rule-btn" id="btn-rule-free" title="자유 계획 선택" style="font-size: 11px; padding: 2px 7px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f8fafc; cursor: pointer;">자유 계획</button>
+                    </div>
+                </div>
+                <input
+                    type="text"
+                    id="plan-rule"
+                    placeholder="예: 1회 90분 집중 블록, 50분 뽀모도로 세분화, 자유 계획 등"
+                    value="자유 계획"
+                    maxlength="100"
+                >
+                <div class="help">
+                    이 계획을 실천할 때 지킬 시간 관리 원칙을 적거나 위의 버튼을 눌러보세요. 5일 실사용 통계의 '적용 규칙'에 자동 집계됩니다.
+                </div>
+            </div>
 
             <div class="form-group">
                 <label for="tags">태그 (선택)</label>
@@ -753,15 +770,15 @@
             </div>
         </div>
 
-        <!-- 📊 [T07-C132] 5일 실사용 관찰 통계 컴포넌트 -->
+        <!-- 📊 실사용 관찰 통계 컴포넌트 -->
         <div class="see-observation-section" id="see-observation-section" style="margin-top: 24px; background: #ffffff; border-radius: 12px; border: 1.5px solid #e2e8f0; padding: 20px 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.03);">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px; flex-wrap: wrap; gap: 8px;">
                 <div>
                     <h3 style="margin: 0; font-size: 16px; color: #1e293b; display: flex; align-items: center; gap: 8px;">
-                        <span>📊</span><span>5일 실사용 관찰 통계 컴포넌트</span>
+                        <span>📊</span><span>실사용 관찰 통계 컴포넌트</span>
                     </h3>
                     <p style="margin: 4px 0 0 0; font-size: 12.5px; color: #64748b;">
-                        지표: <strong>계획 실행 달성률 (%)</strong> = (실제 집중 시간 / 계획 시간) × 100 · 손계산과 1의 오차도 없는 정확한 합계 및 평균 집계
+                        지표: <strong>계획 실행 달성률 (%)</strong> = (실제 집중 시간 / 계획 시간) × 100 · 실제 계획과 실행 기록 기반 실시간 통계
                     </p>
                 </div>
                 <div style="display: flex; gap: 8px;">
@@ -771,30 +788,30 @@
                 </div>
             </div>
 
-            <!-- 요약 카드: 합계 & 평균 (오차 0 검증) -->
+            <!-- 요약 카드: 합계 & 평균 -->
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 18px;">
                 <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px 18px;">
-                    <div style="font-size: 12px; color: #64748b; font-weight: 600;">5일 전체 합계 (Total)</div>
+                    <div style="font-size: 12px; color: #64748b; font-weight: 600;">전체 합계 (Total)</div>
                     <div style="font-size: 20px; font-weight: 700; color: #0f172a; margin-top: 4px;" id="obs-total-summary">
-                        계획 <span id="obs-total-planned">480</span>분 / 실제 <span id="obs-total-actual">412</span>분
+                        계획 <span id="obs-total-planned">0</span>분 / 실제 <span id="obs-total-actual">0</span>분
                     </div>
                     <div style="font-size: 12.5px; color: #2563eb; margin-top: 3px;">
-                        합계 기준 달성률: <strong id="obs-total-rate" style="font-size: 14px;">85.8%</strong> (손계산 일치)
+                        합계 기준 달성률: <strong id="obs-total-rate" style="font-size: 14px;">0.0%</strong>
                     </div>
                 </div>
 
                 <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 14px 18px;">
-                    <div style="font-size: 12px; color: #166534; font-weight: 600;">5일 산술 평균 (Average)</div>
+                    <div style="font-size: 12px; color: #166534; font-weight: 600;">일평균 (Average)</div>
                     <div style="font-size: 20px; font-weight: 700; color: #14532d; margin-top: 4px;" id="obs-avg-summary">
-                        일평균 계획 <span id="obs-avg-planned">96.0</span>분 / 실제 <span id="obs-avg-actual">82.4</span>분
+                        일평균 계획 <span id="obs-avg-planned">0.0</span>분 / 실제 <span id="obs-avg-actual">0.0</span>분
                     </div>
                     <div style="font-size: 12.5px; color: #15803d; margin-top: 3px;">
-                        5일 평균 달성률: <strong id="obs-avg-rate" style="font-size: 14px;">85.4%</strong> (소수 첫째 자리 반올림)
+                        평균 달성률: <strong id="obs-avg-rate" style="font-size: 14px;">0.0%</strong> (소수 첫째 자리 반올림)
                     </div>
                 </div>
             </div>
 
-            <!-- 5일 관찰 데이터 테이블 -->
+            <!-- 실사용 관찰 데이터 테이블 -->
             <div class="table-responsive" style="overflow-x: auto; margin-bottom: 16px;">
                 <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: center;">
                     <thead>
@@ -805,7 +822,7 @@
                             <th style="padding: 10px 8px;">계획 시간</th>
                             <th style="padding: 10px 8px;">실제 몰입 시간</th>
                             <th style="padding: 10px 8px;">달성률 (%)</th>
-                            <th style="padding: 10px 8px;">예외 및 상태 처리</th>
+                            <th style="padding: 10px 8px;">상태</th>
                         </tr>
                     </thead>
                     <tbody id="obs-table-body">
@@ -814,10 +831,10 @@
                     <tfoot style="background: #f8fafc; font-weight: 700; border-top: 2px solid #cbd5e1;">
                         <tr>
                             <td colspan="3" style="padding: 10px 8px; text-align: center;">합계 (Total)</td>
-                            <td style="padding: 10px 8px;" id="obs-foot-total-planned">480분</td>
-                            <td style="padding: 10px 8px;" id="obs-foot-total-actual">412분</td>
-                            <td style="padding: 10px 8px; color: #2563eb;" id="obs-foot-total-rate">85.8%</td>
-                            <td style="padding: 10px 8px; font-size: 11.5px; color: #64748b;">손계산 검증 완료</td>
+                            <td style="padding: 10px 8px;" id="obs-foot-total-planned">0분</td>
+                            <td style="padding: 10px 8px;" id="obs-foot-total-actual">0분</td>
+                            <td style="padding: 10px 8px; color: #2563eb;" id="obs-foot-total-rate">0.0%</td>
+                            <td style="padding: 10px 8px; font-size: 11.5px; color: #64748b;">실시간 집계</td>
                         </tr>
                         <tr>
                             <td colspan="3" style="padding: 10px 8px; text-align: center;">산술 평균 (Average)</td>
@@ -927,7 +944,7 @@
 
 </div>
 
-<script src="{{ url_for('static', filename='script.js') }}"></script>
+<script src="{{ url_for('static', filename='script.js') }}?v=20260929_1720"></script>
 <script>
     
     // Base64URL <-> ArrayBuffer 유틸리티 함수
@@ -1282,16 +1299,6 @@
         }
     }
 
-    // 📖 [T07 남길 것 01] 인증 구현 설명서 모달 열기/닫기
-    function openAuthDocModal() {
-        const modal = document.getElementById("authDocModal");
-        if (modal) modal.style.display = "flex";
-    }
-
-    function closeAuthDocModal() {
-        const modal = document.getElementById("authDocModal");
-        if (modal) modal.style.display = "none";
-    }
 
     document.addEventListener("DOMContentLoaded", () => {
         initSessionTimer();
@@ -1418,111 +1425,6 @@
     </div>
 </div>
 
-<!-- 📖 [T07 남길 것 01] 인증 구현 설명서 모달 -->
-<div id="authDocModal" class="modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.65); z-index: 99999; align-items: center; justify-content: center; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);">
-    <div style="background: #fff; border-radius: 16px; padding: 26px 28px; max-width: 820px; width: 92vw; max-height: 86vh; overflow-y: auto; box-shadow: 0 16px 44px rgba(0,0,0,0.25); box-sizing: border-box; position: relative; text-align: left; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-        <!-- ✕ 닫기 버튼 -->
-        <button type="button" onclick="closeAuthDocModal()" style="position: absolute; top: 16px; right: 18px; border: none; background: transparent; font-size: 22px; cursor: pointer; color: #888; line-height: 1; padding: 4px;" title="닫기">✕</button>
-
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-            <span style="font-size: 24px;">📖</span>
-            <h2 style="font-size: 19px; font-weight: 700; color: #1e3a8a; margin: 0;">인증 구현 설명서</h2>
-            <span style="background: #dbeafe; color: #1e40af; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; margin-left: auto;">인증 체계 명세</span>
-        </div>
-        <p style="font-size: 12px; color: #64748b; margin: 0 0 16px; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px;">
-            본 문서는 시스템의 6개 항목 필수 인증 구현 명세서입니다. (모든 비밀값·토큰은 마스킹 처리됨)
-        </p>
-
-        <!-- ① 무엇으로 붙였나 -->
-        <div style="background: #f8fafc; border-left: 4px solid #3b82f6; border-radius: 6px; padding: 12px 14px; margin-bottom: 12px;">
-            <h3 style="font-size: 13.5px; font-weight: 700; color: #1e3a8a; margin: 0 0 6px;">① 무엇으로 붙였나</h3>
-            <ul style="font-size: 12px; color: #334155; margin: 0; padding-left: 18px; line-height: 1.6;">
-                <li><strong>비밀번호 해시 & 인증:</strong> Werkzeug Security (PBKDF2 SHA-256 + Salt) 솔팅 해시 암호화</li>
-                <li><strong>세션 관리:</strong> Flask-Login 기반 서버 사이드 세션 및 30분 유효기간 타이머, HttpOnly SameSite 쿠키</li>
-                <li><strong>생체인증(패스키):</strong> FIDO2 / WebAuthn 표준 생체인식 (지문, Face ID, Windows Hello)</li>
-                <li><strong>원격 모바일 간편인증:</strong> Cloudflare Tunnel / Ngrok 연동 원격 모바일 QR 세션 로그인 체계</li>
-            </ul>
-        </div>
-
-        <!-- ② 왜 그걸 골랐나 -->
-        <div style="background: #f8fafc; border-left: 4px solid #10b981; border-radius: 6px; padding: 12px 14px; margin-bottom: 12px;">
-            <h3 style="font-size: 13.5px; font-weight: 700; color: #065f46; margin: 0 0 6px;">② 왜 그걸 골랐나</h3>
-            <ul style="font-size: 12px; color: #334155; margin: 0; padding-left: 18px; line-height: 1.6;">
-                <li><strong>사용자 격리 및 Zero Vendor Lock-in:</strong> 외부 유료 SaaS(Firebase, Supabase 등)에 종속되지 않고 로컬 SQLite DB와 연계하여 사용자별 데이터(user_id)를 완전 분리 격리.</li>
-                <li><strong>웹 표준 보안 충족:</strong> FIDO2 패스키 표준을 준수하여 비밀번호 없이도 기기 생체인식으로 간편하고 안전하게 로그인 가능.</li>
-                <li><strong>정적/모바일 환경 확장성:</strong> PC 브라우저뿐만 아니라 스마트폰 카메라로 QR을 스캔하여 모바일과 데스크톱 간 끊김 없는 인증 세션 인계 지원.</li>
-            </ul>
-        </div>
-
-        <!-- ③ 어디를 어떻게 고쳤나 -->
-        <div style="background: #f8fafc; border-left: 4px solid #8b5cf6; border-radius: 6px; padding: 12px 14px; margin-bottom: 12px;">
-            <h3 style="font-size: 13.5px; font-weight: 700; color: #5b21b6; margin: 0 0 6px;">③ 어디를 어떻게 고쳤나 (핵심 흐름 4가지)</h3>
-            <div style="font-size: 12px; color: #334155; line-height: 1.6; display: grid; grid-template-columns: 1fr; gap: 6px;">
-                <div style="background: #fff; padding: 6px 10px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                    <strong>1) 회원가입 (Sign Up):</strong> <code>app.py</code> &rarr; <code>register()</code><br>
-                    <span style="color: #64748b;">- <code>generate_password_hash(password, method='pbkdf2:sha256')</code> 솔팅 해시 생성 후 User DB 저장</span>
-                </div>
-                <div style="background: #fff; padding: 6px 10px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                    <strong>2) 로그인 (Sign In):</strong> <code>app.py</code> &rarr; <code>login()</code><br>
-                    <span style="color: #64748b;">- <code>check_password_hash()</code> 검증 후 <code>login_user()</code> 세션 생성, 30분 만료 타이머 설정 및 마지막 접속 시각 갱신</span>
-                </div>
-                <div style="background: #fff; padding: 6px 10px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                    <strong>3) 로그아웃 (Sign Out):</strong> <code>app.py</code> &rarr; <code>logout()</code><br>
-                    <span style="color: #64748b;">- <code>logout_user()</code> 및 <code>session.clear()</code>로 활성 세션 쿠키 즉시 무효화</span>
-                </div>
-                <div style="background: #fff; padding: 6px 10px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                    <strong>4) 자료 조회 (Data Fetch):</strong> <code>app.py</code> &rarr; <code>api_plans()</code>, <code>api_see_observation_stats()</code><br>
-                    <span style="color: #64748b;">- <code>@login_required</code> 가드 검증 및 <code>filter_by(user_id=current_user.id)</code>로 본인 소유 데이터만 엄격히 조회·격리</span>
-                </div>
-            </div>
-        </div>
-
-        <!-- ④ 안 열리는 것을 확인한 기록 -->
-        <div style="background: #f8fafc; border-left: 4px solid #f59e0b; border-radius: 6px; padding: 12px 14px; margin-bottom: 12px;">
-            <h3 style="font-size: 13.5px; font-weight: 700; color: #b45309; margin: 0 0 6px;">④ 안 열리는 것을 확인한 기록 (확인 5가지 대조)</h3>
-            <div style="font-size: 11.5px; color: #334155; line-height: 1.5; font-family: monospace; background: #fff; padding: 8px 10px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                <div><strong>[확인 1: 비인가 접근 차단]</strong></div>
-                <div style="color: #166534;">- 성공: [GET /api/plans] Cookie: session=ey...[생략] &rarr; <span style="font-weight:700;">200 OK</span></div>
-                <div style="color: #991b1b;">- 거절: [GET /api/plans] 세션 쿠키 없음 &rarr; <span style="font-weight:700;">401 Unauthorized</span> (로그인 화면 강제 리다이렉트)</div>
-                <div style="margin-top: 5px;"><strong>[확인 2: 유효 계정 인증 vs 틀린 비밀번호]</strong></div>
-                <div style="color: #166534;">- 성공: [POST /login] id: jychoi, pw: **** &rarr; <span style="font-weight:700;">200 OK</span> (세션 정상 발급)</div>
-                <div style="color: #991b1b;">- 거절: [POST /login] id: jychoi, pw: wrong_pass &rarr; <span style="font-weight:700;">401 Unauthorized</span> ("비밀번호가 일치하지 않습니다")</div>
-                <div style="margin-top: 5px;"><strong>[확인 3: 로그아웃 후 세션 재사용 방지]</strong></div>
-                <div style="color: #166534;">- 성공: [POST /logout] &rarr; <span style="font-weight:700;">200 OK</span> (세션 무효화)</div>
-                <div style="color: #991b1b;">- 거절: [GET /api/plans] 이전 세션 ey...[생략] 재전송 &rarr; <span style="font-weight:700;">401 Unauthorized</span> ("만료된 세션")</div>
-                <div style="margin-top: 5px;"><strong>[확인 4: 타인 자료 접근 격리 (IDOR 방지)]</strong></div>
-                <div style="color: #166534;">- 성공: [GET /api/plans] (user 1 세션) &rarr; <span style="font-weight:700;">200 OK</span> (내 계획 2건만 반환)</div>
-                <div style="color: #991b1b;">- 거절: [GET /api/plans/999] (타인 user 2 계획 조회 시도) &rarr; <span style="font-weight:700;">403 Forbidden</span> ("권한 없음")</div>
-                <div style="margin-top: 5px;"><strong>[확인 5: 타인 자료 수정/삭제 차단]</strong></div>
-                <div style="color: #166534;">- 성공: [DELETE /api/plans/1] (본인 작성 계획) &rarr; <span style="font-weight:700;">200 OK</span></div>
-                <div style="color: #991b1b;">- 거절: [DELETE /api/plans/999] (타인 작성 계획) &rarr; <span style="font-weight:700;">403 Forbidden</span> ("소유권 불일치")</div>
-            </div>
-        </div>
-
-        <!-- ⑤ AI와 나 -->
-        <div style="background: #f8fafc; border-left: 4px solid #6366f1; border-radius: 6px; padding: 12px 14px; margin-bottom: 12px;">
-            <h3 style="font-size: 13.5px; font-weight: 700; color: #4338ca; margin: 0 0 6px;">⑤ AI와 나</h3>
-            <ul style="font-size: 12px; color: #334155; margin: 0; padding-left: 18px; line-height: 1.6;">
-                <li><strong>AI에게 맡긴 일:</strong> Flask <code>@login_required</code> 가드 라우터 데코레이터 구성 및 5일 관찰 통계 수식(결측치 0 처리, Math.round 소수점 첫째 자리 집계) 보일러플레이트 코드 작성</li>
-                <li><strong>내가 직접 판단한 일:</strong> 2일차 실천 후 3일차부터 90분 단위를 50분 뽀모도로 방식으로 축소 변경한 의사결정, 세션 만료 30분 타이머 정책 및 비밀번호 변경 시 이전 세션 일괄 무효화 UX 결정</li>
-                <li><strong>AI 말을 안 들은 일:</strong> 외부 서드파티 OAuth/SaaS(Firebase) 의존 제안을 배제하고, SQLite 로컬 DB와 긴밀히 결합된 자체 완결형 세션 및 FIDO2 WebAuthn 표준 인증 아키텍처 채택</li>
-            </ul>
-        </div>
-
-        <!-- ⑥ 아직 못 막은 것 -->
-        <div style="background: #fef2f2; border-left: 4px solid #ef4444; border-radius: 6px; padding: 12px 14px; margin-bottom: 16px;">
-            <h3 style="font-size: 13.5px; font-weight: 700; color: #b91c1c; margin: 0 0 6px;">⑥ 아직 못 막은 것 (보안 취약점 및 위험성)</h3>
-            <ul style="font-size: 12px; color: #7f1d1d; margin: 0; padding-left: 18px; line-height: 1.6;">
-                <li><strong>미비점:</strong> 단기간 반복 로그인 시도를 제한하는 무차별 대입 공격(Brute Force) 방지용 Rate Limiting(IP/계정당 시도 횟수 제한) 미구현.</li>
-                <li><strong>위험성:</strong> 악의적인 공격자가 자동화된 사전 대입 스크립트를 통해 무제한으로 비밀번호를 추측 시도할 경우, 단순한 비밀번호를 사용하는 사용자의 계정이 탈취될 수 있는 잠재적 위험이 존재함. (향후 개선: Flask-Limiter 도입 예정)</li>
-            </ul>
-        </div>
-
-        <button type="button" onclick="closeAuthDocModal()" style="width: 100%; padding: 10px; background: #1e40af; border: none; border-radius: 8px; font-size: 13px; color: #fff; cursor: pointer; font-weight: 700; box-shadow: 0 2px 6px rgba(30,64,175,0.25);">
-            확인 및 닫기
-        </button>
-    </div>
-</div>
 
 </body>
 </html>
