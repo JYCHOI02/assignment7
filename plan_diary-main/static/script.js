@@ -25,6 +25,11 @@ const startDateInput = document.getElementById("start-date");
 const endDateInput = document.getElementById("end-date");
 const successCriteriaInput = document.getElementById("success-criteria");
 const expectedMinutesInput = document.getElementById("expected-minutes");
+const planUnitMinBtn = document.getElementById("plan-unit-min");
+const planUnitHourBtn = document.getElementById("plan-unit-hour");
+const planTimeUnitLabel = document.getElementById("plan-time-unit-label");
+const planTimeConvertHint = document.getElementById("plan-time-convert-hint");
+let planTimeUnit = "min"; // "min" 또는 "hour"
 const tagsInput = document.getElementById("tags");
 
 const submitButton = document.getElementById("submit-button");
@@ -90,6 +95,11 @@ const executionForm = document.getElementById("execution-form");
 const execStartTimeInput = document.getElementById("exec-start-time");
 const execEndTimeInput = document.getElementById("exec-end-time");
 const execActualMinutesInput = document.getElementById("exec-actual-minutes");
+const execUnitMinBtn = document.getElementById("exec-unit-min");
+const execUnitHourBtn = document.getElementById("exec-unit-hour");
+const execTimeUnitLabel = document.getElementById("exec-time-unit-label");
+const execTimeConvertHint = document.getElementById("exec-time-convert-hint");
+let execTimeUnit = "min"; // "min" 또는 "hour"
 const execBlockerReasonInput = document.getElementById("exec-blocker-reason");
 const execMemoInput = document.getElementById("exec-memo");
 const execMarkCompleted = document.getElementById("exec-mark-completed");
@@ -1335,6 +1345,159 @@ function formatMinutes(minutes) {
     return `${hours}시간 ${remainingMinutes}분`;
 }
 
+// 시간 단위(분 / 시간) 전환 및 실시간 힌트 헬퍼
+function updatePlanTimeHint() {
+    if (!expectedMinutesInput || !planTimeConvertHint) return;
+    const val = parseFloat(expectedMinutesInput.value);
+    if (isNaN(val) || val <= 0) {
+        planTimeConvertHint.textContent = "";
+        return;
+    }
+    if (planTimeUnit === "min") {
+        if (val >= 60) {
+            planTimeConvertHint.textContent = `(= ${formatMinutes(val)})`;
+        } else {
+            planTimeConvertHint.textContent = "";
+        }
+    } else {
+        const mins = Math.round(val * 60);
+        planTimeConvertHint.textContent = `(= ${mins}분)`;
+    }
+}
+
+function setPlanTimeUnit(unit) {
+    if (planTimeUnit === unit) return;
+    const currentVal = parseFloat(expectedMinutesInput ? expectedMinutesInput.value : "");
+    planTimeUnit = unit;
+
+    if (unit === "hour") {
+        if (planUnitHourBtn) {
+            planUnitHourBtn.classList.add("active");
+            planUnitHourBtn.style.background = "#2e543c";
+            planUnitHourBtn.style.color = "#fff";
+        }
+        if (planUnitMinBtn) {
+            planUnitMinBtn.classList.remove("active");
+            planUnitMinBtn.style.background = "transparent";
+            planUnitMinBtn.style.color = "#475569";
+        }
+        if (planTimeUnitLabel) planTimeUnitLabel.textContent = "시간";
+        if (expectedMinutesInput) {
+            expectedMinutesInput.step = "0.1";
+            expectedMinutesInput.min = "0.1";
+            expectedMinutesInput.placeholder = "2";
+            if (!isNaN(currentVal) && currentVal > 0) {
+                expectedMinutesInput.value = Number((currentVal / 60).toFixed(2));
+            }
+        }
+    } else {
+        if (planUnitMinBtn) {
+            planUnitMinBtn.classList.add("active");
+            planUnitMinBtn.style.background = "#2e543c";
+            planUnitMinBtn.style.color = "#fff";
+        }
+        if (planUnitHourBtn) {
+            planUnitHourBtn.classList.remove("active");
+            planUnitHourBtn.style.background = "transparent";
+            planUnitHourBtn.style.color = "#475569";
+        }
+        if (planTimeUnitLabel) planTimeUnitLabel.textContent = "분";
+        if (expectedMinutesInput) {
+            expectedMinutesInput.step = "1";
+            expectedMinutesInput.min = "1";
+            expectedMinutesInput.placeholder = "120";
+            if (!isNaN(currentVal) && currentVal > 0) {
+                expectedMinutesInput.value = Math.round(currentVal * 60);
+            }
+        }
+    }
+    updatePlanTimeHint();
+}
+
+function updateExecTimeHint() {
+    if (!execActualMinutesInput || !execTimeConvertHint) return;
+    const val = parseFloat(execActualMinutesInput.value);
+    if (isNaN(val) || val <= 0) {
+        execTimeConvertHint.textContent = "";
+        return;
+    }
+    if (execTimeUnit === "min") {
+        if (val >= 60) {
+            execTimeConvertHint.textContent = `(= ${formatMinutes(val)})`;
+        } else {
+            execTimeConvertHint.textContent = "";
+        }
+    } else {
+        const mins = Math.round(val * 60);
+        execTimeConvertHint.textContent = `(= ${mins}분)`;
+    }
+}
+
+function setExecTimeUnit(unit) {
+    if (execTimeUnit === unit) return;
+    const currentVal = parseFloat(execActualMinutesInput ? execActualMinutesInput.value : "");
+    execTimeUnit = unit;
+
+    if (unit === "hour") {
+        if (execUnitHourBtn) {
+            execUnitHourBtn.classList.add("active");
+            execUnitHourBtn.style.background = "#2e543c";
+            execUnitHourBtn.style.color = "#fff";
+        }
+        if (execUnitMinBtn) {
+            execUnitMinBtn.classList.remove("active");
+            execUnitMinBtn.style.background = "transparent";
+            execUnitMinBtn.style.color = "#475569";
+        }
+        if (execTimeUnitLabel) execTimeUnitLabel.textContent = "시간";
+        if (execActualMinutesInput) {
+            execActualMinutesInput.step = "0.1";
+            execActualMinutesInput.min = "0.1";
+            execActualMinutesInput.placeholder = "1";
+            if (!isNaN(currentVal) && currentVal > 0) {
+                execActualMinutesInput.value = Number((currentVal / 60).toFixed(2));
+            }
+        }
+    } else {
+        if (execUnitMinBtn) {
+            execUnitMinBtn.classList.add("active");
+            execUnitMinBtn.style.background = "#2e543c";
+            execUnitMinBtn.style.color = "#fff";
+        }
+        if (execUnitHourBtn) {
+            execUnitHourBtn.classList.remove("active");
+            execUnitHourBtn.style.background = "transparent";
+            execUnitHourBtn.style.color = "#475569";
+        }
+        if (execTimeUnitLabel) execTimeUnitLabel.textContent = "분";
+        if (execActualMinutesInput) {
+            execActualMinutesInput.step = "1";
+            execActualMinutesInput.min = "1";
+            execActualMinutesInput.placeholder = "60";
+            if (!isNaN(currentVal) && currentVal > 0) {
+                execActualMinutesInput.value = Math.round(currentVal * 60);
+            }
+        }
+    }
+    updateExecTimeHint();
+}
+
+// 실행 실제 시간 수동 입력 시 시작 시각과 끝 시각 자동 연동
+function onExecActualMinutesManualInput() {
+    updateExecTimeHint();
+    if (!execStartTimeInput || !execStartTimeInput.value || !execEndTimeInput) return;
+    const val = parseFloat(execActualMinutesInput.value);
+    if (isNaN(val) || val <= 0) return;
+    const mins = execTimeUnit === "hour" ? Math.round(val * 60) : Math.round(val);
+    const start = new Date(execStartTimeInput.value);
+    if (!isNaN(start.getTime())) {
+        const end = new Date(start.getTime() + mins * 60000);
+        const pad = (n) => String(n).padStart(2, "0");
+        const endStr = `${end.getFullYear()}-${pad(end.getMonth() + 1)}-${pad(end.getDate())}T${pad(end.getHours())}:${pad(end.getMinutes())}`;
+        execEndTimeInput.value = endStr;
+    }
+}
+
 // HTML 이스케이프 유틸
 function escapeHtml(text) {
     if (!text) return "";
@@ -1362,6 +1525,7 @@ function showCreateMode() {
     newPlanActionBtn.classList.add("hidden");
 
     form.reset();
+    if (planTimeConvertHint) planTimeConvertHint.textContent = "";
     if (tagsInput) tagsInput.value = "";
     endDateInput.min = "";
 
@@ -1437,7 +1601,12 @@ function showEditMode() {
     endDateInput.value = currentPlan.current_end_date;
     endDateInput.min = currentPlan.current_start_date;
     successCriteriaInput.value = currentPlan.current_success_criteria;
-    expectedMinutesInput.value = currentPlan.current_expected_minutes;
+    if (planTimeUnit === "hour") {
+        expectedMinutesInput.value = Number((currentPlan.current_expected_minutes / 60).toFixed(2));
+    } else {
+        expectedMinutesInput.value = currentPlan.current_expected_minutes;
+    }
+    updatePlanTimeHint();
     if (tagsInput) tagsInput.value = currentPlan.tags || "";
 
     formSection.scrollIntoView({ behavior: "smooth" });
@@ -1469,12 +1638,18 @@ endDateInput.addEventListener("change", function() {
 form.addEventListener("submit", async function(event) {
     event.preventDefault();
 
+    let finalExpectedMinutes = 0;
+    const rawExpected = parseFloat(expectedMinutesInput.value);
+    if (!isNaN(rawExpected) && rawExpected > 0) {
+        finalExpectedMinutes = planTimeUnit === "hour" ? Math.round(rawExpected * 60) : Math.round(rawExpected);
+    }
+
     const planData = {
         title: titleInput.value.trim(),
         start_date: startDateInput.value,
         end_date: endDateInput.value,
         success_criteria: successCriteriaInput.value.trim(),
-        expected_minutes: Number(expectedMinutesInput.value),
+        expected_minutes: finalExpectedMinutes,
         tags: tagsInput ? tagsInput.value.trim() : ""
     };
 
@@ -1499,7 +1674,7 @@ form.addEventListener("submit", async function(event) {
     }
 
     if (!planData.expected_minutes || planData.expected_minutes <= 0) {
-        showStatus("예상 시간을 입력해주세요.", "error");
+        showStatus("예상 시간을 1분(또는 0.1시간) 이상 입력해주세요.", "error");
         return;
     }
 
@@ -1769,7 +1944,7 @@ function attachMinuteZeroHandler(input) {
     });
 }
 
-// 시작/끝 시각 입력 시 실제로 걸린 시간(분) 자동 계산
+// 시작/끝 시각 입력 시 실제로 걸린 시간(분 / 시간) 자동 계산
 function autoCalculateActualMinutes() {
     if (!execStartTimeInput || !execEndTimeInput || !execActualMinutesInput) return;
     const startVal = execStartTimeInput.value;
@@ -1780,9 +1955,15 @@ function autoCalculateActualMinutes() {
         const diffMs = end - start;
         if (diffMs >= 0) {
             const minutes = Math.round(diffMs / 60000);
-            execActualMinutesInput.value = minutes;
+            if (execTimeUnit === "hour") {
+                execActualMinutesInput.value = Number((minutes / 60).toFixed(2));
+            } else {
+                execActualMinutesInput.value = minutes;
+            }
+            updateExecTimeHint();
         } else {
             execActualMinutesInput.value = 0;
+            if (execTimeConvertHint) execTimeConvertHint.textContent = "";
         }
     }
 }
@@ -1885,7 +2066,11 @@ async function handleExecutionSubmit(event, confirmedOverlap = false) {
 
     const startTime = execStartTimeInput.value;
     const endTime = execEndTimeInput.value;
-    const actualMinutes = Number(execActualMinutesInput.value);
+    let actualMinutes = 0;
+    const rawActual = parseFloat(execActualMinutesInput.value);
+    if (!isNaN(rawActual) && rawActual > 0) {
+        actualMinutes = execTimeUnit === "hour" ? Math.round(rawActual * 60) : Math.round(rawActual);
+    }
     const blockerReason = execBlockerReasonInput ? execBlockerReasonInput.value.trim() : "";
     const memo = execMemoInput ? execMemoInput.value.trim() : "";
     const markCompleted = execMarkCompleted ? execMarkCompleted.checked : false;
@@ -1942,7 +2127,7 @@ async function handleExecutionSubmit(event, confirmedOverlap = false) {
     }
 
     if (!actualMinutes || actualMinutes <= 0) {
-        showStatus("실제로 걸린 시간을 1분 이상 입력해주세요.", "error");
+        showStatus("실제로 걸린 시간을 1분(또는 0.1시간) 이상 입력해주세요.", "error");
         return;
     }
 
@@ -2005,6 +2190,7 @@ async function handleExecutionSubmit(event, confirmedOverlap = false) {
         if (execBlockerReasonInput) execBlockerReasonInput.value = "";
         if (execMemoInput) execMemoInput.value = "";
         if (execMarkCompleted) execMarkCompleted.checked = false;
+        if (execTimeConvertHint) execTimeConvertHint.textContent = "";
 
         // 계획 목록, 실행 기록 및 돌아보기 즉시 갱신
         await loadPlans();
@@ -2567,6 +2753,27 @@ if (execEndTimeInput) {
         validateEndTimeNotBeforeStart();
         autoCalculateActualMinutes();
     });
+}
+
+// ⏱️ 시간 단위(분 / 시간) 토글 이벤트 및 실시간 힌트 리스너
+if (planUnitMinBtn) {
+    planUnitMinBtn.addEventListener("click", () => setPlanTimeUnit("min"));
+}
+if (planUnitHourBtn) {
+    planUnitHourBtn.addEventListener("click", () => setPlanTimeUnit("hour"));
+}
+if (expectedMinutesInput) {
+    expectedMinutesInput.addEventListener("input", updatePlanTimeHint);
+}
+
+if (execUnitMinBtn) {
+    execUnitMinBtn.addEventListener("click", () => setExecTimeUnit("min"));
+}
+if (execUnitHourBtn) {
+    execUnitHourBtn.addEventListener("click", () => setExecTimeUnit("hour"));
+}
+if (execActualMinutesInput) {
+    execActualMinutesInput.addEventListener("input", onExecActualMinutesManualInput);
 }
 
 // 📊 Section 05 돌아보기 새로고침 버튼 이벤트

@@ -172,16 +172,28 @@
 
 
             <div class="form-group">
-                <label for="expected-minutes">예상 시간</label>
-                <div class="time-input">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <label for="expected-minutes" style="margin-bottom: 0;">예상 시간</label>
+                    <div class="time-unit-toggle" id="plan-time-unit-toggle" title="입력 단위 전환 (분 / 시간)">
+                        <button type="button" id="plan-unit-min" class="unit-btn active">분</button>
+                        <button type="button" id="plan-unit-hour" class="unit-btn">시간</button>
+                    </div>
+                </div>
+                <div class="time-input" style="display: flex; align-items: center; gap: 8px;">
                     <input
                         type="number"
                         id="expected-minutes"
                         min="1"
+                        step="1"
                         placeholder="120"
                         required
+                        style="max-width: 140px;"
                     >
-                    <span>분</span>
+                    <span id="plan-time-unit-label" style="font-weight: 600; color: #475569; min-width: 24px;">분</span>
+                    <span id="plan-time-convert-hint" style="font-size: 12px; color: #0284c7; font-weight: 600;"></span>
+                </div>
+                <div class="help">
+                    계획을 수행하는 데 걸릴 예상 시간을 분(분 단위) 또는 시간(시간 단위)으로 입력해주세요.
                 </div>
             </div>
 
@@ -560,13 +572,20 @@
                     <input type="datetime-local" id="exec-end-time" step="60" required>
                 </div>
 
-                <div class="form-group" style="width: 170px;">
-                    <label for="exec-actual-minutes">실제로 걸린 시간</label>
-                    <div class="time-input">
-                        <input type="number" id="exec-actual-minutes" min="1" placeholder="60" required>
-                        <span>분</span>
+                <div class="form-group" style="min-width: 210px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                        <label for="exec-actual-minutes" style="margin-bottom: 0;">실제로 걸린 시간</label>
+                        <div class="time-unit-toggle" id="exec-time-unit-toggle" title="입력 단위 전환 (분 / 시간)">
+                            <button type="button" id="exec-unit-min" class="unit-btn active">분</button>
+                            <button type="button" id="exec-unit-hour" class="unit-btn">시간</button>
+                        </div>
                     </div>
-                    <div class="help" style="font-size: 11px;">시작/끝 시각 선택 시 자동 계산</div>
+                    <div class="time-input" style="display: flex; align-items: center; gap: 6px;">
+                        <input type="number" id="exec-actual-minutes" min="1" step="1" placeholder="60" required style="max-width: 110px;">
+                        <span id="exec-time-unit-label" style="font-weight: 600; color: #475569; min-width: 24px;">분</span>
+                        <span id="exec-time-convert-hint" style="font-size: 11.5px; color: #0284c7; font-weight: 600;"></span>
+                    </div>
+                    <div class="help" style="font-size: 11px;">시작/끝 시각 또는 직접 입력 시 자동 연동</div>
                 </div>
             </div>
 

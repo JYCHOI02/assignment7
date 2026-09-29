@@ -1723,6 +1723,13 @@ def create_plan():
     except (ValueError, TypeError):
         expected_minutes = 0
 
+    if expected_minutes <= 0 and ("expected_hours" in data or data.get("time_unit") == "hour"):
+        try:
+            h = float(data.get("expected_hours") or data.get("expected_minutes", 0))
+            expected_minutes = max(1, int(round(h * 60)))
+        except (ValueError, TypeError):
+            expected_minutes = 0
+
     if not title:
         return jsonify({"success": False, "message": "계획명을 입력해 주세요."}), 400
     if not start_date or not end_date:
@@ -1840,6 +1847,13 @@ def update_plan():
         expected_minutes = int(data.get("expected_minutes", 0))
     except (ValueError, TypeError):
         expected_minutes = 0
+
+    if expected_minutes <= 0 and ("expected_hours" in data or data.get("time_unit") == "hour"):
+        try:
+            h = float(data.get("expected_hours") or data.get("expected_minutes", 0))
+            expected_minutes = max(1, int(round(h * 60)))
+        except (ValueError, TypeError):
+            expected_minutes = 0
 
     if not title:
         return jsonify({"success": False, "message": "계획명을 입력해 주세요."}), 400
