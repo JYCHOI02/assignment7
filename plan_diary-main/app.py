@@ -143,7 +143,21 @@ def get_public_base_url():
         except Exception:
             pass
 
-    # 2. 환경 변수 확인
+    # 2. 로컬에서 실행 중인 ngrok (4040 포트) 자동 감지
+    try:
+        req = urllib.request.Request("http://127.0.0.1:4040/api/tunnels")
+        with urllib.request.urlopen(req, timeout=0.5) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            tunnels = data.get("tunnels", [])
+            for t in tunnels:
+                p_url = t.get("public_url")
+                if p_url and p_url.startswith("https"):
+                    PUBLIC_TUNNEL_URL = p_url.rstrip('/')
+                    return PUBLIC_TUNNEL_URL
+    except Exception:
+        pass
+
+    # 3. 환경 변수 확인
     env_url = os.environ.get("TUNNEL_URL")
     if env_url and env_url.startswith("http"):
         PUBLIC_TUNNEL_URL = env_url.rstrip('/')
