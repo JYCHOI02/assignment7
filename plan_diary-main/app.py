@@ -114,15 +114,32 @@ def get_public_base_url():
     """스마트폰 QR 스캔 시 접속할 수 있는 외부 접속(HTTPS 터널 또는 호스트) URL을 반환합니다."""
     global PUBLIC_TUNNEL_URL
 
-    # 1. tunnel_url.txt 파일 우선 확인 (ngrok 고정 도메인 등 우선 적용)
+    if PUBLIC_TUNNEL_URL:
+        return PUBLIC_TUNNEL_URL
+
+    # 1. tunnel_url.txt 파일 확인
     tunnel_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel_url.txt")
     if os.path.exists(tunnel_file):
         try:
             with open(tunnel_file, "r", encoding="utf-8") as f:
                 content = f.read().strip()
                 if content.startswith("http"):
-                    PUBLIC_TUNNEL_URL = content.rstrip('/')
-                    return PUBLIC_TUNNEL_URL
+                    # ngrok인 경우, 로컬 4040 포트에서 실제 실행 중인지 검증 (타 PC 고정 도메인 오염 방지)
+                    if "ngrok" in content:
+                        try:
+                            req = urllib.request.Request("http://127.0.0.1:4040/api/tunnels")
+                            with urllib.request.urlopen(req, timeout=0.8) as resp:
+                                if resp.status == 200:
+                                    PUBLIC_TUNNEL_URL = content.rstrip('/')
+                                    return PUBLIC_TUNNEL_URL
+                        except Exception:
+                            pass
+                    elif "trycloudflare.com" in content:
+                        PUBLIC_TUNNEL_URL = content.rstrip('/')
+                        return PUBLIC_TUNNEL_URL
+                    else:
+                        PUBLIC_TUNNEL_URL = content.rstrip('/')
+                        return PUBLIC_TUNNEL_URL
         except Exception:
             pass
 
@@ -130,9 +147,6 @@ def get_public_base_url():
     env_url = os.environ.get("TUNNEL_URL")
     if env_url and env_url.startswith("http"):
         PUBLIC_TUNNEL_URL = env_url.rstrip('/')
-        return PUBLIC_TUNNEL_URL
-
-    if PUBLIC_TUNNEL_URL:
         return PUBLIC_TUNNEL_URL
 
     # 3. 요청 컨텍스트가 있으면 request.host_url
@@ -155,17 +169,65 @@ def start_tunnel_daemon():
             return
         _TUNNEL_STARTED = True
 
+    def _start_cloudflared():
+        cloudflared_path = shutil.which("cloudflared") or r"C:\Program Files (x86)\cloudflared\cloudflared.exe" or r"C:\Program Files\cloudflared\cloudflared.exe"
+        if not os.path.exists(cloudflared_path):
+            print("[터널 알림] cloudflared가 설치되어 있지 않습니다. 로컬(http://localhost:5000) 모드로 동작합니다.")
+            return
+
+        def _cloudflared_worker():
+            global PUBLIC_TUNNEL_URL
+            try:
+                cmd = [cloudflared_path, "tunnel", "--url", "http://127.0.0.1:5000"]
+                flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    creationflags=flags
+                )
+                import atexit
+                atexit.register(lambda: proc.kill())
+
+                for line in iter(proc.stdout.readline, ''):
+                    match = re.search(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', line)
+                    if match:
+                        found_url = match.group(1)
+                        with TUNNEL_LOCK:
+                            PUBLIC_TUNNEL_URL = found_url
+                            tunnel_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel_url.txt")
+                            with open(tunnel_file, "w", encoding="utf-8") as f:
+                                f.write(found_url + "\n")
+                        print(f"\n[Cloudflare Tunnel] 모바일 연동용 공개 HTTPS URL 생성 성공: {found_url}\n")
+                        break
+
+                for _ in iter(proc.stdout.readline, ''):
+                    pass
+            except Exception as e:
+                print("[Cloudflare Tunnel 실행 오류]:", e)
+
+        t = threading.Thread(target=_cloudflared_worker, daemon=True)
+        t.start()
+
     current = get_public_base_url()
 
-    # 1. ngrok 고정 도메인이 설정된 경우
-    if current and "ngrok" in current:
+    # 1. ngrok 고정 도메인이 설정되어 있고, 로컬에 ngrok 또는 pyngrok이 있는 경우 시도
+    local_ngrok = os.path.join(os.environ.get("LOCALAPPDATA", ""), "ngrok", "ngrok.exe")
+    ngrok_exe = local_ngrok if os.path.exists(local_ngrok) else shutil.which("ngrok")
+    has_pyngrok = False
+    try:
+        import pyngrok
+        has_pyngrok = True
+    except ImportError:
+        pass
+
+    if current and "ngrok" in current and (ngrok_exe or has_pyngrok):
         ngrok_domain = current.replace("https://", "").replace("http://", "").strip()
 
         def _ngrok_worker():
             try:
-                # 1) 로컬 ngrok web API(4040 포트)에 이미 동일 도메인의 터널이 살아있는지 직접 확인
-                #    (pyngrok.get_tunnels() 직접 호출 시 새 ngrok 프로세스가 추가 생성되어 포트가 4041로 밀리고
-                #     중복 엔드포인트 에러 ERR_NGROK_6030가 발생하는 현상 방지)
                 try:
                     req = urllib.request.Request("http://127.0.0.1:4040/api/tunnels")
                     with urllib.request.urlopen(req, timeout=1.5) as resp:
@@ -177,96 +239,27 @@ def start_tunnel_daemon():
                 except Exception:
                     pass
 
-                # 2) 4040에 유효한 터널이 없다면, 과거 종료되지 않고 남아있는 고아 ngrok 프로세스 정리
-                #    (동일 고정 도메인에 다중 프로세스가 연결되어 발생하는 ERR_NGROK_6030 완전 방지)
-                if os.name == 'nt':
-                    try:
-                        subprocess.run(
-                            ["taskkill", "/f", "/im", "ngrok.exe"],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL
-                        )
-                    except Exception:
-                        pass
-
                 from pyngrok import ngrok, conf
                 import atexit
 
-                local_ngrok = os.path.join(os.environ.get("LOCALAPPDATA", ""), "ngrok", "ngrok.exe")
-                ngrok_exe = local_ngrok if os.path.exists(local_ngrok) else shutil.which("ngrok")
                 if ngrok_exe:
                     conf.get_default().ngrok_path = ngrok_exe
 
                 print(f"\n[ngrok] 고정 도메인 연결 시도: {current} ...")
                 tunnel = ngrok.connect(5000, domain=ngrok_domain)
                 print(f"\n[ngrok 고정 터널 연결 성공!] 접속 URL: {tunnel.public_url}\n")
-
-                # 프로세스 종료 시 백그라운드 ngrok 자동 정리
                 atexit.register(lambda: ngrok.kill())
             except Exception as e:
-                err_msg = str(e)
-                if "4018" in err_msg or "authentication failed" in err_msg:
-                    ngrok_cmd = ngrok_exe if ngrok_exe else "ngrok"
-                    print("\n" + "!" * 60)
-                    print("[ngrok 인증 필요] ngrok auth 토큰 등록이 필요합니다.")
-                    print("대시보드(https://dashboard.ngrok.com/get-started/your-authtoken)에서 토큰을 확인한 후,")
-                    print("터미널에 다음 명령어를 입력해 주세요:")
-                    print(f"  & '{ngrok_cmd}' config add-authtoken <내토큰>")
-                    print("!" * 60 + "\n")
-                elif "6030" in err_msg or "multiple endpoints" in err_msg or "4030" in err_msg:
-                    print(f"\n[ngrok 6030/4030 오류 감지]: 다른 프로세스에서 {ngrok_domain}을 사용 중입니다.")
-                    print("기존 ngrok 프로세스를 정리 후 다시 연결합니다.\n")
-                else:
-                    print(f"[ngrok 실행 오류]: {e}")
+                print(f"[ngrok 실행 오류]: {e}")
+                # ngrok 실패 시 바로 cloudflared로 폴백
+                _start_cloudflared()
 
         t = threading.Thread(target=_ngrok_worker, daemon=True)
         t.start()
         return
 
-    # 2. cloudflared 임시 터널 (ngrok이 아니고 trycloudflare일 때만)
-    cloudflared_path = shutil.which("cloudflared") or r"C:\Program Files (x86)\cloudflared\cloudflared.exe"
-    if not os.path.exists(cloudflared_path):
-        return
-
-    # 이미 유효한 터널 URL이 있고 응답하면 추가 실행하지 않음
-    if current and "trycloudflare.com" in current:
-        try:
-            req = urllib.request.Request(current, headers={"User-Agent": "HealthCheck"})
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                if resp.status in (200, 302, 404):
-                    return
-        except Exception:
-            pass
-
-    def _cloudflared_worker():
-        global PUBLIC_TUNNEL_URL
-        try:
-            cmd = [cloudflared_path, "tunnel", "--url", "http://127.0.0.1:5000"]
-            flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                creationflags=flags
-            )
-            for line in iter(proc.stdout.readline, ''):
-                match = re.search(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', line)
-                if match:
-                    found_url = match.group(1)
-                    with TUNNEL_LOCK:
-                        PUBLIC_TUNNEL_URL = found_url
-                        tunnel_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel_url.txt")
-                        with open(tunnel_file, "w", encoding="utf-8") as f:
-                            f.write(found_url + "\n")
-                    print(f"\n[Cloudflare Tunnel] 모바일 연동용 공개 URL: {found_url}\n")
-                    break
-        except Exception as e:
-            print("[Cloudflare Tunnel 실행 오류]:", e)
-
-    t = threading.Thread(target=_cloudflared_worker, daemon=True)
-    t.start()
+    # ngrok 조건이 아니거나 ngrok 미설치 시 cloudflared 즉시 실행
+    _start_cloudflared()
 
 
 # 하위 호환 별칭 유지
@@ -1416,14 +1409,27 @@ def mobile_approve_page():
 def qr_approve_options():
     """스마트폰 지문 인증을 위한 WebAuthn Assertion 챌린지 생성"""
     data = request.get_json() or {}
-    token = data.get("token")
+    token = (data.get("token") or "").strip()
     username = data.get("username", "").strip()
 
+    if not token:
+        return jsonify({"success": False, "message": "QR 토큰 정보가 없습니다. PC 화면의 QR 코드를 다시 스캔해 주세요."}), 400
+
     conn = get_db()
+    session_row = conn.execute("SELECT * FROM qr_login_sessions WHERE token = ?", (token,)).fetchone()
+    if not session_row:
+        conn.close()
+        return jsonify({"success": False, "message": "유효하지 않은 QR 세션입니다. PC 화면의 QR 코드를 다시 스캔해 주세요."}), 404
+
+    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+    if session_row["expires_at"] < now_str or session_row["status"] != "PENDING":
+        conn.close()
+        return jsonify({"success": False, "message": "만료되었거나 이미 사용된 QR 세션입니다. PC 화면을 새로고침한 뒤 다시 시도해 주세요."}), 400
+
     user = conn.execute("SELECT id, username FROM users WHERE username = ?", (username,)).fetchone()
     if not user:
         conn.close()
-        return jsonify({"success": False, "message": f"'{username}' 계정을 찾을 수 없거나 등록된 패스키가 없습니다. 아이디를 확인해 주세요."}), 400
+        return jsonify({"success": False, "message": f"'{username}' 계정을 찾을 수 없습니다. 아이디를 확인해 주세요."}), 400
 
     # 해당 유저의 등록된 패스키 조회
     keys = conn.execute("SELECT credential_id FROM passkeys WHERE user_id = ?", (user["id"],)).fetchall()
@@ -1432,7 +1438,7 @@ def qr_approve_options():
     if not keys:
         return jsonify({
             "success": False,
-            "message": f"'{username}' 계정을 찾을 수 없거나 등록된 패스키가 없습니다. 먼저 패스키를 등록해 주세요."
+            "message": f"'{username}' 계정에 등록된 패스키(지문)가 없습니다. 먼저 스마트폰에서 패스키를 등록해 주세요."
         }), 400
 
     # 챌린지 발급
@@ -1455,11 +1461,26 @@ def qr_approve_options():
 def qr_approve():
     """스마트폰에서 실제 암호학적 지문 서명(WebAuthn) 검증 후 컴퓨터 로그인 승인"""
     data = request.get_json() or {}
-    token = data.get("token")
+    token = (data.get("token") or "").strip()
     username = data.get("username", "").strip()
+
+    if not token:
+        return jsonify({"success": False, "message": "QR 토큰 정보가 없습니다. PC 화면의 QR 코드를 다시 스캔해 주세요."}), 400
+
+    conn = get_db()
+    session_row = conn.execute("SELECT * FROM qr_login_sessions WHERE token = ?", (token,)).fetchone()
+    if not session_row:
+        conn.close()
+        return jsonify({"success": False, "message": "유효하지 않은 QR 세션입니다. PC 화면의 QR 코드를 다시 스캔해 주세요."}), 404
+
+    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+    if session_row["expires_at"] < now_str or session_row["status"] != "PENDING":
+        conn.close()
+        return jsonify({"success": False, "message": "만료되었거나 이미 사용된 QR 세션입니다. PC 화면을 새로고침해 주세요."}), 400
 
     expected_challenge = session.get(f"qr_challenge_{token}")
     if not expected_challenge:
+        conn.close()
         return jsonify({"success": False, "message": "승인 세션이 만료되었습니다. 다시 시도해 주세요."}), 400
 
     cred_id = data.get("id")
@@ -1469,12 +1490,12 @@ def qr_approve():
     sig_b64 = resp.get("signature")
 
     if not cred_id or not auth_data_b64 or not client_data_b64 or not sig_b64:
+        conn.close()
         return jsonify({
             "success": False,
             "message": "스마트폰 지문 인증(서명) 데이터가 누락되었습니다. 등록된 지문으로 인증해야 합니다."
         }), 400
 
-    conn = get_db()
     # 등록된 패스키 확인 및 소유자 검증
     passkey_row = conn.execute("""
         SELECT p.*, u.username, u.id AS uid
@@ -1505,16 +1526,6 @@ def qr_approve():
     except Exception as e:
         conn.close()
         return jsonify({"success": False, "message": f"서명 검증 오류: {str(e)}"}), 400
-
-    session_row = conn.execute("SELECT * FROM qr_login_sessions WHERE token = ?", (token,)).fetchone()
-    if not session_row:
-        conn.close()
-        return jsonify({"success": False, "message": "유효하지 않은 QR 세션입니다."}), 404
-
-    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
-    if session_row["expires_at"] < now_str or session_row["status"] != "PENDING":
-        conn.close()
-        return jsonify({"success": False, "message": "만료되었거나 이미 사용된 QR 세션입니다."}), 400
 
     # 승인 완료 처리
     conn.execute("""
@@ -2769,9 +2780,8 @@ def export_all_data():
 if __name__ == "__main__":
     init_db()
 
-    # Werkzeug reloader 프로세스 2중 구동으로 인한 터널 중복 생성(ERR_NGROK_6030) 방지
-    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
-        start_cloudflared_daemon()
+    # 모바일 생체인증(QR 로그인)을 위한 터널 데몬 시작
+    start_tunnel_daemon()
 
     print("=" * 60)
     print("플랜두씨 다이어리 2 (Plan-Do-See) - 인증 & 격리 서버 시작")

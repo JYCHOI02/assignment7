@@ -202,6 +202,8 @@
                 <div id="qrStatusText" style="font-size: 12px; font-weight: 600; color: #2e543c;">
                     📲 스마트폰에서 승인 대기 중...
                 </div>
+                <div id="qrDomainInfo" style="font-size: 11px; color: #555; margin: 4px 0 6px; word-break: break-all;"></div>
+                <button type="button" onclick="initQrRemoteLogin()" style="padding: 4px 12px; font-size: 11px; font-weight: 600; background: #fff; border: 1.5px solid #2e543c; border-radius: 6px; cursor: pointer; color: #2e543c; transition: all 0.2s;">🔄 QR 새로고침</button>
             <!-- 💡 초보자 안내 도움말 (접기/펼치기) -->
             <details style="margin-top: 12px; text-align: left; background: #fff; border: 1px solid #dcd8c8; border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #555;">
                 <summary style="font-weight: 700; color: #2e543c; cursor: pointer; user-select: none;">
@@ -407,6 +409,10 @@
     // [QR Remote Approval] PC 화면 로드 시 일회용 QR 생성 및 폴링 시작
     async function initQrRemoteLogin() {
         try {
+            document.getElementById('qrLoading').style.display = 'block';
+            document.getElementById('qrImageWrap').style.display = 'none';
+            if (pollInterval) clearInterval(pollInterval);
+
             const res = await fetch('/api/auth/qr/create', { method: 'POST' });
             const data = await res.json();
             if (res.ok && data.success) {
@@ -417,15 +423,24 @@
                 const qrUrl = "https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=" + encodeURIComponent(approveUrl);
                 
                 document.getElementById('qrImg').src = qrUrl;
+                document.getElementById('qrStatusText').innerHTML = '📲 스마트폰에서 승인 대기 중...';
+                try {
+                    const u = new URL(approveUrl);
+                    const domainElem = document.getElementById('qrDomainInfo');
+                    if (domainElem) {
+                        domainElem.innerHTML = '🌐 도메인: <b>' + u.host + '</b>';
+                    }
+                } catch(e) {}
+
                 document.getElementById('qrLoading').style.display = 'none';
                 document.getElementById('qrImageWrap').style.display = 'block';
 
-                // 1초마다 스마트폰 승인 여부 감시 시작
-                if (pollInterval) clearInterval(pollInterval);
+                // 1.2초마다 스마트폰 승인 여부 감시 시작
                 pollInterval = setInterval(pollQrApprovalStatus, 1200);
             }
         } catch (e) {
             console.error("QR 세션 생성 실패:", e);
+            document.getElementById('qrLoading').innerHTML = '⚠️ QR 생성 실패. 페이지를 새로고침해 주세요.';
         }
     }
 
