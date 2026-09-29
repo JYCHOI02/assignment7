@@ -612,7 +612,7 @@ function renderPlanList(plansToRender = allPlans) {
                     <span class="plan-status-badge status-${isCompleted ? "완료" : "진행중"}">
                         ${isCompleted ? "완료" : "진행중"}
                     </span>
-                    ${plan.is_delayed ? `<span class="plan-status-badge status-지연" title="마감일 초과 미완료 (T06-C30)">⏰ 지연</span>` : ""}
+                    ${plan.is_delayed ? `<span class="plan-status-badge status-지연" title="마감일 초과 미완료">⏰ 지연</span>` : ""}
                     ${(plan.blocker_count && plan.blocker_count > 0) ? `<span class="plan-status-badge status-막힘" title="실행 중 병목 발생">🚧 막힘</span>` : ""}
                     <span class="plan-priority-badge ${priorityClass}">${escapeHtml(pVal)}</span>
                     ${(plan.history_count && plan.history_count > 0) ? `<span class="plan-history-count-badge" title="고치기 전 계획 ${plan.history_count}건 보존 중">이력 ${plan.history_count}건</span>` : ""}

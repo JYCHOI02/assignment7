@@ -37,7 +37,7 @@
                     <span>🔑</span><span>비밀번호 변경</span>
                 </button>
                 <!-- 📖 [T07 남길 것 01] 인증 구현 설명서 모달 -->
-                <button type="button" onclick="openAuthDocModal()" style="padding: 5px 10px; font-size: 12px; background: #1e40af; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(30,64,175,0.2);" title="인증 구현 설명서 (T07 남길 것 01 증빙 캡처)">
+                <button type="button" onclick="openAuthDocModal()" style="padding: 5px 10px; font-size: 12px; background: #1e40af; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(30,64,175,0.2);" title="인증 구현 설명서 (6대 항목 및 검증 명세)">
                     <span>📖</span><span>인증 구현 설명서</span>
                 </button>
                 <!-- 🗑️ [T07-C134] 회원 탈퇴 및 데이터 삭제 -->
@@ -515,7 +515,7 @@
                 </div>
 
                 <div class="notice" style="margin-top: 16px;">
-                    💡 <strong>T06-C08 충족:</strong> 계획을 고쳐도 기존 계획을 덮어쓰지 않고, 고치기 전 계획을 별도의 표(DB 테이블 및 화면)에 분리 저장하여 계획 ID를 유지한 채 안전하게 보존합니다.
+                    💡 <strong>계획 보존 안내:</strong> 계획을 고쳐도 기존 계획을 덮어쓰지 않고, 고치기 전 계획을 별도의 표(DB 테이블 및 화면)에 분리 저장하여 계획 ID를 유지한 채 안전하게 보존합니다.
                 </div>
 
             </section>
@@ -723,7 +723,7 @@
                     <span class="trace-arrow">이동 ↗</span>
                 </div>
                 <div class="see-kpi-value"><span id="see-delayed-count">0</span><span class="unit">개</span></div>
-                <div class="see-kpi-subtext" id="see-delayed-sub">마감일 초과 미완료 (T06-C30)</div>
+                <div class="see-kpi-subtext" id="see-delayed-sub">마감일 초과 미완료</div>
             </div>
 
             <div class="see-kpi-card blocked-card clickable" id="kpi-card-blocked" title="클릭 시 막혔던 이유 기록으로 이동">
@@ -758,7 +758,7 @@
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px; flex-wrap: wrap; gap: 8px;">
                 <div>
                     <h3 style="margin: 0; font-size: 16px; color: #1e293b; display: flex; align-items: center; gap: 8px;">
-                        <span>📊</span><span>5일 실사용 관찰 통계 컴포넌트 (T07-C132)</span>
+                        <span>📊</span><span>5일 실사용 관찰 통계 컴포넌트</span>
                     </h3>
                     <p style="margin: 4px 0 0 0; font-size: 12.5px; color: #64748b;">
                         지표: <strong>계획 실행 달성률 (%)</strong> = (실제 집중 시간 / 계획 시간) × 100 · 손계산과 1의 오차도 없는 정확한 합계 및 평균 집계
@@ -830,9 +830,9 @@
                 </table>
             </div>
 
-            <!-- 5대 예외 처리 규칙 명시 블록 (T07-C132 준수) -->
+            <!-- 5대 예외 처리 규칙 명시 블록 -->
             <div style="background: #fdf8f6; border-left: 4px solid #ea580c; padding: 12px 16px; border-radius: 4px; font-size: 12px; color: #7c2d12;">
-                <strong>📋 5대 예외 처리 및 집계 규칙 명시 (T07-C132 준수):</strong>
+                <strong>📋 5대 예외 처리 및 집계 규칙 안내:</strong>
                 <ul style="margin: 6px 0 0 16px; padding: 0; line-height: 1.6;">
                     <li><strong>결측치 (Missing)</strong>: 값이 누락된 일자는 0분 처리하여 통계 연속성 보장</li>
                     <li><strong>중복값 (Duplicate)</strong>: 동일 일자/계획에 중복 실행 기록이 있을 시 최신 기록 덮어쓰기 정책 적용</li>
@@ -1392,7 +1392,7 @@
         <h2 style="font-size: 19px; font-weight: 700; color: #b91c1c; margin: 0 0 8px;">회원 탈퇴 및 계정 영구 삭제</h2>
 
         <div style="background: #fef2f2; border: 1.5px solid #fca5a5; border-radius: 8px; padding: 12px; margin-bottom: 16px; text-align: left; font-size: 13px; color: #991b1b; line-height: 1.5;">
-            <strong>🚨 주의 (T07-C134 안내):</strong><br>
+            <strong>🚨 주의 안내:</strong><br>
             <span style="font-weight: 700; color: #b91c1c;">"계정을 삭제하면 모든 기록 데이터가 즉시 함께 삭제됩니다"</span><br>
             <span style="font-size: 12px; color: #7f1d1d;">(작성한 모든 계획, 세부 과제, 수정 이력, 실행 기록, 돌아보기 개선 액션, 패스키 자격증명이 DB에서 영구 소멸되며 복구할 수 없습니다.)</span>
         </div>
@@ -1426,11 +1426,11 @@
 
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
             <span style="font-size: 24px;">📖</span>
-            <h2 style="font-size: 19px; font-weight: 700; color: #1e3a8a; margin: 0;">T07 카드 5: 인증 구현 설명서 (증빙 01)</h2>
-            <span style="background: #dbeafe; color: #1e40af; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; margin-left: auto;">01_인증구현설명서.png</span>
+            <h2 style="font-size: 19px; font-weight: 700; color: #1e3a8a; margin: 0;">인증 구현 설명서</h2>
+            <span style="background: #dbeafe; color: #1e40af; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; margin-left: auto;">인증 체계 명세</span>
         </div>
         <p style="font-size: 12px; color: #64748b; margin: 0 0 16px; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px;">
-            본 문서는 과제 T07 심사를 위한 6개 항목 필수 인증 구현 명세서입니다. (모든 비밀값·토큰은 마스킹 처리됨)
+            본 문서는 시스템의 6개 항목 필수 인증 구현 명세서입니다. (모든 비밀값·토큰은 마스킹 처리됨)
         </p>
 
         <!-- ① 무엇으로 붙였나 -->
