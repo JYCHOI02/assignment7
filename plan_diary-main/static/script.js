@@ -2642,4 +2642,162 @@ if (drawerGotoDoBtn) {
         }
     });
 }
+
+// ==========================================================
+// 🗑️ [T07-C134] 회원 탈퇴 및 계정 영구 삭제 핸들러
+// ==========================================================
+window.openDeleteAccountModal = function() {
+    const modal = document.getElementById("deleteAccountModal");
+    if (modal) modal.style.display = "flex";
+    const pwInput = document.getElementById("deleteAccountPasswordInput");
+    if (pwInput) pwInput.value = "";
+    const msg = document.getElementById("deleteAccountMsg");
+    if (msg) msg.textContent = "";
+};
+
+window.closeDeleteAccountModal = function() {
+    const modal = document.getElementById("deleteAccountModal");
+    if (modal) modal.style.display = "none";
+};
+
+window.submitDeleteAccount = async function(event) {
+    if (event) event.preventDefault();
+    const pwInput = document.getElementById("deleteAccountPasswordInput");
+    const msg = document.getElementById("deleteAccountMsg");
+    const btn = document.getElementById("deleteAccountConfirmBtn");
+
+    const password = pwInput ? pwInput.value.trim() : "";
+    if (!password) {
+        if (msg) msg.textContent = "비밀번호를 입력해 주세요.";
+        return;
+    }
+
+    if (!confirm("정말로 회원 탈퇴를 진행하시겠습니까?\n계정을 삭제하면 모든 기록 데이터가 즉시 함께 삭제되며 복구할 수 없습니다.")) {
+        return;
+    }
+
+    try {
+        if (btn) btn.disabled = true;
+        if (msg) {
+            msg.textContent = "영구 삭제 처리 중...";
+            msg.style.color = "#475569";
+        }
+
+        const res = await fetch("/api/auth/delete-account", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "ngrok-skip-browser-warning": "true"
+            },
+            body: JSON.stringify({ password: password })
+        });
+
+        const data = await res.json();
+        if (res.ok && data.success) {
+            alert("회원 탈퇴 및 모든 데이터의 영구 삭제가 완료되었습니다.\n로그인 화면으로 이동합니다.");
+            window.location.href = "/login";
+        } else {
+            if (msg) {
+                msg.textContent = data.message || "탈퇴 처리에 실패했습니다.";
+                msg.style.color = "#dc2626";
+            }
+            if (btn) btn.disabled = false;
+        }
+    } catch (err) {
+        console.error("회원 탈퇴 오류:", err);
+        if (msg) {
+            msg.textContent = "네트워크 오류가 발생했습니다. 다시 시도해 주세요.";
+            msg.style.color = "#dc2626";
+        }
+        if (btn) btn.disabled = false;
+    }
+};
+
+// ==========================================================
+// 📊 [T07-C132] 5일 실사용 관찰 통계 컴포넌트 렌더링
+// ==========================================================
+window.loadObservationStats = async function() {
+    const tbody = document.getElementById("obs-table-body");
+    if (!tbody) return;
+
+    try {
+        const res = await fetch("/api/see/observation-stats", {
+            headers: { "ngrok-skip-browser-warning": "true" }
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data || !data.days) return;
+
+        // 요약 카드 갱신
+        const tot = data.totals || {};
+        const avg = data.averages || {};
+
+        const elTotPlanned = document.getElementById("obs-total-planned");
+        const elTotActual = document.getElementById("obs-total-actual");
+        const elTotRate = document.getElementById("obs-total-rate");
+
+        if (elTotPlanned) elTotPlanned.textContent = tot.planned_minutes || 0;
+        if (elTotActual) elTotActual.textContent = tot.actual_minutes || 0;
+        if (elTotRate) elTotRate.textContent = (tot.achievement_rate || 0) + "%";
+
+        const elAvgPlanned = document.getElementById("obs-avg-planned");
+        const elAvgActual = document.getElementById("obs-avg-actual");
+        const elAvgRate = document.getElementById("obs-avg-rate");
+
+        if (elAvgPlanned) elAvgPlanned.textContent = avg.planned_minutes || 0;
+        if (elAvgActual) elAvgActual.textContent = avg.actual_minutes || 0;
+        if (elAvgRate) elAvgRate.textContent = (avg.achievement_rate || 0) + "%";
+
+        // tfoot 합계/평균 갱신
+        const footTotPlanned = document.getElementById("obs-foot-total-planned");
+        const footTotActual = document.getElementById("obs-foot-total-actual");
+        const footTotRate = document.getElementById("obs-foot-total-rate");
+
+        if (footTotPlanned) footTotPlanned.textContent = (tot.planned_minutes || 0) + "분";
+        if (footTotActual) footTotActual.textContent = (tot.actual_minutes || 0) + "분";
+        if (footTotRate) footTotRate.textContent = (tot.achievement_rate || 0) + "%";
+
+        const footAvgPlanned = document.getElementById("obs-foot-avg-planned");
+        const footAvgActual = document.getElementById("obs-foot-avg-actual");
+        const footAvgRate = document.getElementById("obs-foot-avg-rate");
+
+        if (footAvgPlanned) footAvgPlanned.textContent = (avg.planned_minutes || 0) + "분";
+        if (footAvgActual) footAvgActual.textContent = (avg.actual_minutes || 0) + "분";
+        if (footAvgRate) footAvgRate.textContent = (avg.achievement_rate || 0) + "%";
+
+        // 5일 테이블 렌더링
+        tbody.innerHTML = "";
+        data.days.forEach(d => {
+            const tr = document.createElement("tr");
+            tr.style.borderBottom = "1px solid #f1f5f9";
+
+            const rate = d.achievement_rate;
+            let rateBadge = `<span style="font-weight: 700; color: ${rate >= 90 ? '#15803d' : (rate >= 75 ? '#2563eb' : '#ea580c')};">${rate}%</span>`;
+
+            let statusBadge = `<span style="font-size: 11.5px; padding: 2px 6px; border-radius: 4px; background: #f1f5f9; color: #475569;">${escapeHtml(d.exception_status)}</span>`;
+            if (d.day_num === 3) {
+                statusBadge = `<span style="font-size: 11.5px; padding: 2px 6px; border-radius: 4px; background: #eff6ff; color: #1d4ed8; font-weight: 600;">🔄 규칙 변경 적용</span>`;
+            }
+
+            tr.innerHTML = `
+                <td style="padding: 10px 8px; font-weight: 600;">${d.day_num}일차</td>
+                <td style="padding: 10px 8px; font-family: monospace;">${escapeHtml(d.date)}</td>
+                <td style="padding: 10px 8px; color: #475569;">${escapeHtml(d.rule_name)}</td>
+                <td style="padding: 10px 8px;">${d.planned_minutes}분</td>
+                <td style="padding: 10px 8px; font-weight: 600;">${d.actual_minutes}분</td>
+                <td style="padding: 10px 8px;">${rateBadge}</td>
+                <td style="padding: 10px 8px;">${statusBadge}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+
+    } catch (err) {
+        console.error("5일 관찰 통계 로드 오류:", err);
+    }
+};
+
+// 페이지 초기 로드 시 5일 관찰 통계 데이터 자동 로드
+document.addEventListener("DOMContentLoaded", () => {
+    loadObservationStats();
+});
 

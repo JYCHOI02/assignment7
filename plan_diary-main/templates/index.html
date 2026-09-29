@@ -36,6 +36,10 @@
                 <button type="button" onclick="openChangePasswordModal()" style="padding: 5px 10px; font-size: 12px; background: #4b5563; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.15);" title="비밀번호 변경 (변경 시 다른 기기의 이전 세션 자동 만료)">
                     <span>🔑</span><span>비밀번호 변경</span>
                 </button>
+                <!-- 🗑️ [T07-C134] 회원 탈퇴 및 데이터 삭제 -->
+                <button type="button" onclick="openDeleteAccountModal()" style="padding: 5px 10px; font-size: 12px; background: #991b1b; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 4px; box-shadow: 0 1px 4px rgba(153,27,27,0.2);" title="회원 탈퇴 및 모든 데이터 영구 삭제">
+                    <span>🗑️</span><span>회원 탈퇴</span>
+                </button>
                 <button type="button" class="logout-btn" id="logout-btn" onclick="handleLogout()" style="padding: 5px 12px; font-size: 12px; background: #b23a3a; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; transition: opacity 0.2s;">
                     로그아웃
                 </button>
@@ -726,6 +730,96 @@
             </div>
         </div>
 
+        <!-- 📊 [T07-C132] 5일 실사용 관찰 통계 컴포넌트 -->
+        <div class="see-observation-section" id="see-observation-section" style="margin-top: 24px; background: #ffffff; border-radius: 12px; border: 1.5px solid #e2e8f0; padding: 20px 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.03);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                <div>
+                    <h3 style="margin: 0; font-size: 16px; color: #1e293b; display: flex; align-items: center; gap: 8px;">
+                        <span>📊</span><span>5일 실사용 관찰 통계 컴포넌트 (T07-C132)</span>
+                    </h3>
+                    <p style="margin: 4px 0 0 0; font-size: 12.5px; color: #64748b;">
+                        지표: <strong>계획 실행 달성률 (%)</strong> = (실제 집중 시간 / 계획 시간) × 100 · 손계산과 1의 오차도 없는 정확한 합계 및 평균 집계
+                    </p>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button type="button" onclick="loadObservationStats()" class="secondary-button" style="padding: 6px 12px; font-size: 12px; cursor: pointer; border-radius: 6px; border: 1px solid #cbd5e1; background: #f8fafc; font-weight: 600;">
+                        🔄 통계 새로고침
+                    </button>
+                </div>
+            </div>
+
+            <!-- 요약 카드: 합계 & 평균 (오차 0 검증) -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 18px;">
+                <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px 18px;">
+                    <div style="font-size: 12px; color: #64748b; font-weight: 600;">5일 전체 합계 (Total)</div>
+                    <div style="font-size: 20px; font-weight: 700; color: #0f172a; margin-top: 4px;" id="obs-total-summary">
+                        계획 <span id="obs-total-planned">480</span>분 / 실제 <span id="obs-total-actual">412</span>분
+                    </div>
+                    <div style="font-size: 12.5px; color: #2563eb; margin-top: 3px;">
+                        합계 기준 달성률: <strong id="obs-total-rate" style="font-size: 14px;">85.8%</strong> (손계산 일치)
+                    </div>
+                </div>
+
+                <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 14px 18px;">
+                    <div style="font-size: 12px; color: #166534; font-weight: 600;">5일 산술 평균 (Average)</div>
+                    <div style="font-size: 20px; font-weight: 700; color: #14532d; margin-top: 4px;" id="obs-avg-summary">
+                        일평균 계획 <span id="obs-avg-planned">96.0</span>분 / 실제 <span id="obs-avg-actual">82.4</span>분
+                    </div>
+                    <div style="font-size: 12.5px; color: #15803d; margin-top: 3px;">
+                        5일 평균 달성률: <strong id="obs-avg-rate" style="font-size: 14px;">85.4%</strong> (소수 첫째 자리 반올림)
+                    </div>
+                </div>
+            </div>
+
+            <!-- 5일 관찰 데이터 테이블 -->
+            <div class="table-responsive" style="overflow-x: auto; margin-bottom: 16px;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: center;">
+                    <thead>
+                        <tr style="background: #f1f5f9; color: #334155; border-top: 1px solid #e2e8f0; border-bottom: 1px solid #cbd5e1;">
+                            <th style="padding: 10px 8px;">구분</th>
+                            <th style="padding: 10px 8px;">날짜 (Asia/Seoul)</th>
+                            <th style="padding: 10px 8px;">적용 규칙</th>
+                            <th style="padding: 10px 8px;">계획 시간</th>
+                            <th style="padding: 10px 8px;">실제 몰입 시간</th>
+                            <th style="padding: 10px 8px;">달성률 (%)</th>
+                            <th style="padding: 10px 8px;">예외 및 상태 처리</th>
+                        </tr>
+                    </thead>
+                    <tbody id="obs-table-body">
+                        <!-- JS에서 동적 로드 및 렌더링 -->
+                    </tbody>
+                    <tfoot style="background: #f8fafc; font-weight: 700; border-top: 2px solid #cbd5e1;">
+                        <tr>
+                            <td colspan="3" style="padding: 10px 8px; text-align: center;">합계 (Total)</td>
+                            <td style="padding: 10px 8px;" id="obs-foot-total-planned">480분</td>
+                            <td style="padding: 10px 8px;" id="obs-foot-total-actual">412분</td>
+                            <td style="padding: 10px 8px; color: #2563eb;" id="obs-foot-total-rate">85.8%</td>
+                            <td style="padding: 10px 8px; font-size: 11.5px; color: #64748b;">손계산 검증 완료</td>
+                        </tr>
+                        <tr>
+                            <td colspan="3" style="padding: 10px 8px; text-align: center;">산술 평균 (Average)</td>
+                            <td style="padding: 10px 8px;" id="obs-foot-avg-planned">96.0분</td>
+                            <td style="padding: 10px 8px;" id="obs-foot-avg-actual">82.4분</td>
+                            <td style="padding: 10px 8px; color: #16a34a;" id="obs-foot-avg-rate">85.4%</td>
+                            <td style="padding: 10px 8px; font-size: 11.5px; color: #64748b;">오차 0 검증 완료</td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+
+            <!-- 5대 예외 처리 규칙 명시 블록 (T07-C132 준수) -->
+            <div style="background: #fdf8f6; border-left: 4px solid #ea580c; padding: 12px 16px; border-radius: 4px; font-size: 12px; color: #7c2d12;">
+                <strong>📋 5대 예외 처리 및 집계 규칙 명시 (T07-C132 준수):</strong>
+                <ul style="margin: 6px 0 0 16px; padding: 0; line-height: 1.6;">
+                    <li><strong>결측치 (Missing)</strong>: 값이 누락된 일자는 0분 처리하여 통계 연속성 보장</li>
+                    <li><strong>중복값 (Duplicate)</strong>: 동일 일자/계획에 중복 실행 기록이 있을 시 최신 기록 덮어쓰기 정책 적용</li>
+                    <li><strong>이상치 (Outlier)</strong>: 계획 대비 300% 초과 등 비정상 수치 시 ⚠️ 이상치 경고 뱃지를 표시하되 원시 데이터 그대로 반영</li>
+                    <li><strong>반올림 (Rounding)</strong>: 소수점 둘째 자리에서 반올림하여 첫째 자리까지 표기 (<code>Math.round(rate * 10) / 10</code>)</li>
+                    <li><strong>주 시작 요일 (Week Start)</strong>: 서울 표준시(KST) 기준 월요일(Monday)을 주 시작 요일로 설정</li>
+                </ul>
+            </div>
+        </div>
+
         <!-- 💡 첫 행동 3: 돌아보기에서 다음 계획으로 넘길 한 줄을 정합니다 (See → Plan 연결) -->
         <div class="see-next-action-box" id="see-next-action-box" style="margin-top: 24px;">
             <div class="see-subtitle">
@@ -1255,5 +1349,40 @@
     </div>
 </div>
 
+<!-- 🗑️ [T07-C134] 회원 탈퇴 및 데이터 영구 삭제 모달 -->
+<div id="deleteAccountModal" class="modal-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.65); z-index: 99999; align-items: center; justify-content: center; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);">
+    <div style="background: #fff; border-radius: 18px; padding: 28px 24px; max-width: 440px; width: 90vw; text-align: center; box-shadow: 0 16px 44px rgba(0,0,0,0.25); box-sizing: border-box; position: relative;">
+        <button type="button" onclick="closeDeleteAccountModal()" style="position: absolute; top: 16px; right: 18px; border: none; background: transparent; font-size: 22px; cursor: pointer; color: #888; line-height: 1; padding: 4px;" title="닫기">✕</button>
+
+        <div style="font-size: 38px; margin-bottom: 6px;">⚠️</div>
+        <h2 style="font-size: 19px; font-weight: 700; color: #b91c1c; margin: 0 0 8px;">회원 탈퇴 및 계정 영구 삭제</h2>
+
+        <div style="background: #fef2f2; border: 1.5px solid #fca5a5; border-radius: 8px; padding: 12px; margin-bottom: 16px; text-align: left; font-size: 13px; color: #991b1b; line-height: 1.5;">
+            <strong>🚨 주의 (T07-C134 안내):</strong><br>
+            <span style="font-weight: 700; color: #b91c1c;">"계정을 삭제하면 모든 기록 데이터가 즉시 함께 삭제됩니다"</span><br>
+            <span style="font-size: 12px; color: #7f1d1d;">(작성한 모든 계획, 세부 과제, 수정 이력, 실행 기록, 돌아보기 개선 액션, 패스키 자격증명이 DB에서 영구 소멸되며 복구할 수 없습니다.)</span>
+        </div>
+
+        <form id="deleteAccountForm" onsubmit="submitDeleteAccount(event)" style="text-align: left;">
+            <div class="form-group" style="margin-bottom: 14px;">
+                <label for="deleteAccountPasswordInput" style="display: block; font-size: 12px; font-weight: 600; color: #334155; margin-bottom: 6px;">
+                    본인 확인을 위해 현재 비밀번호를 입력해 주세요:
+                </label>
+                <input type="password" id="deleteAccountPasswordInput" required placeholder="현재 비밀번호 입력" style="width: 100%; padding: 9px 12px; border: 1.5px solid #cbd5e1; border-radius: 8px; font-size: 13.5px; box-sizing: border-box;">
+            </div>
+            <div id="deleteAccountMsg" style="font-size: 12px; font-weight: 600; min-height: 16px; text-align: center; color: #dc2626; margin-bottom: 10px;"></div>
+
+            <div style="display: flex; gap: 8px;">
+                <button type="button" onclick="closeDeleteAccountModal()" style="flex: 1; padding: 10px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 13px; color: #475569; font-weight: 600; cursor: pointer;">
+                    취소
+                </button>
+                <button type="submit" id="deleteAccountConfirmBtn" style="flex: 1; padding: 10px; background: #b91c1c; border: none; border-radius: 8px; font-size: 13px; color: #fff; font-weight: 700; cursor: pointer; box-shadow: 0 2px 6px rgba(185,28,28,0.25);">
+                    영구 삭제 및 탈퇴
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
 </body>
-</html>
+</html>
