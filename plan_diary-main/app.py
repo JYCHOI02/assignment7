@@ -189,6 +189,21 @@ def start_tunnel_daemon():
             print("[터널 알림] cloudflared가 설치되어 있지 않습니다. 로컬(http://localhost:5000) 모드로 동작합니다.")
             return
 
+        # 이미 로컬에 cloudflared 프로세스가 돌고 있고 tunnel_url.txt에 유효한 도메인이 있다면 기존 터널 재사용 (도메인 변경 방지)
+        existing_url = get_public_base_url()
+        if existing_url and "trycloudflare.com" in existing_url:
+            try:
+                proc_check = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq cloudflared.exe"],
+                    capture_output=True,
+                    text=True
+                )
+                if "cloudflared.exe" in proc_check.stdout:
+                    print(f"\n[Cloudflare Tunnel] 기존 터널 프로세스 및 도메인 유지: {existing_url}\n")
+                    return
+            except Exception:
+                pass
+
         def _cloudflared_worker():
             global PUBLIC_TUNNEL_URL
             try:
@@ -1456,7 +1471,8 @@ def qr_approve_options():
     if not keys:
         return jsonify({
             "success": False,
-            "message": f"'{username}' 계정에 등록된 패스키(지문)가 없습니다. 먼저 스마트폰에서 패스키를 등록해 주세요."
+            "message": f"'{username}' 계정에 등록된 패스키(지문)가 없습니다. 아래에서 비밀번호를 입력하여 지문을 즉시 등록해 주세요.",
+            "need_register": True
         }), 400
 
     # 챌린지 발급
@@ -1561,6 +1577,143 @@ def qr_approve():
         "success": True,
         "message": f"🎉 {username}님의 지문 서명이 검증되었습니다! 컴퓨터 화면을 확인해 주세요."
     })
+
+
+@app.route("/api/auth/qr/quick-register-options", methods=["POST"])
+def qr_quick_register_options():
+    """모바일 승인 화면에서 지문이 없거나 도메인이 변경된 경우, 1회 비밀번호 확인 후 현재 도메인용 패스키 등록 옵션 생성"""
+    data = request.get_json() or {}
+    token = (data.get("token") or "").strip()
+    username = (data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+
+    if not token:
+        return jsonify({"success": False, "message": "QR 토큰 정보가 없습니다. PC 화면의 QR 코드를 다시 스캔해 주세요."}), 400
+
+    if not username or not password:
+        return jsonify({"success": False, "message": "아이디와 비밀번호를 모두 입력해 주세요."}), 400
+
+    conn = get_db()
+    session_row = conn.execute("SELECT * FROM qr_login_sessions WHERE token = ?", (token,)).fetchone()
+    if not session_row:
+        conn.close()
+        return jsonify({"success": False, "message": "유효하지 않은 QR 세션입니다. PC 화면의 QR 코드를 다시 스캔해 주세요."}), 404
+
+    now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+    if session_row["expires_at"] < now_str or session_row["status"] != "PENDING":
+        conn.close()
+        return jsonify({"success": False, "message": "만료되었거나 이미 사용된 QR 세션입니다. PC 화면을 새로고침해 주세요."}), 400
+
+    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if not user or not check_password_hash(user["password_hash"], password):
+        conn.close()
+        return jsonify({"success": False, "message": "아이디 또는 비밀번호가 올바르지 않습니다."}), 401
+
+    conn.close()
+
+    challenge = passkey_service.b64url_encode(os.urandom(32))
+    session[f"qr_quick_reg_challenge_{token}"] = challenge
+    user_handle = passkey_service.b64url_encode(str(user["id"]).encode("utf-8"))
+
+    options = {
+        "success": True,
+        "challenge": challenge,
+        "rp": {
+            "name": "플랜두씨 다이어리",
+            "id": "localhost" if request.host.split(":")[0] in ["127.0.0.1", "localhost"] else request.host.split(":")[0]
+        },
+        "user": {
+            "id": user_handle,
+            "name": username,
+            "displayName": f"{username}님의 플랜두씨 계정"
+        },
+        "pubKeyCredParams": [
+            {"type": "public-key", "alg": -7},   # ES256 (P-256)
+            {"type": "public-key", "alg": -257}  # RS256
+        ],
+        "authenticatorSelection": {
+            "residentKey": "preferred",
+            "userVerification": "preferred"
+        },
+        "timeout": 60000,
+        "attestation": "none"
+    }
+    return jsonify(options)
+
+
+@app.route("/api/auth/qr/quick-register-verify", methods=["POST"])
+def qr_quick_register_verify():
+    """모바일 승인 화면에서 보낸 새 지문 등록 서명(attestation) 검증 및 저장 후 컴퓨터 즉시 승인(로그인)"""
+    data = request.get_json() or {}
+    token = (data.get("token") or "").strip()
+    username = (data.get("username") or "").strip()
+    device_name = data.get("device_name", "스마트폰 (모바일 등록)")
+    resp = data.get("response", {})
+    attestation_b64 = resp.get("attestationObject")
+    client_data_b64 = resp.get("clientDataJSON")
+
+    if not token or not username or not attestation_b64 or not client_data_b64:
+        return jsonify({"success": False, "message": "필수 파라미터가 누락되었습니다."}), 400
+
+    expected_challenge = session.get(f"qr_quick_reg_challenge_{token}")
+    if not expected_challenge:
+        return jsonify({"success": False, "message": "등록 세션이 만료되었습니다. 다시 시도해 주세요."}), 400
+
+    conn = get_db()
+    session_row = conn.execute("SELECT * FROM qr_login_sessions WHERE token = ?", (token,)).fetchone()
+    if not session_row or session_row["status"] != "PENDING":
+        conn.close()
+        return jsonify({"success": False, "message": "이미 완료되었거나 유효하지 않은 QR 세션입니다."}), 400
+
+    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"success": False, "message": "사용자를 찾을 수 없습니다."}), 404
+
+    try:
+        client_data_bytes = passkey_service.b64url_decode(client_data_b64)
+        client_data = json.loads(client_data_bytes.decode('utf-8'))
+        if client_data.get("type") != "webauthn.create":
+            conn.close()
+            return jsonify({"success": False, "message": "올바르지 않은 WebAuthn 요청입니다."}), 400
+
+        c_challenge = client_data.get("challenge", "").replace("-", "+").replace("_", "/").rstrip("=")
+        e_challenge = expected_challenge.replace("-", "+").replace("_", "/").rstrip("=")
+        if c_challenge != e_challenge:
+            conn.close()
+            return jsonify({"success": False, "message": "챌린지 검증에 실패했습니다."}), 400
+
+        att_bytes = passkey_service.b64url_decode(attestation_b64)
+        parsed = passkey_service.parse_attestation_object(att_bytes)
+
+        cred_id_b64 = parsed["credential_id_b64"]
+        pub_key_pem = parsed["public_key_pem"]
+        now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 1. 새 패스키 DB 저장
+        conn.execute("""
+            INSERT INTO passkeys (user_id, credential_id, public_key, device_name, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user["id"], cred_id_b64, pub_key_pem, device_name, now_str))
+
+        # 2. QR 로그인 세션을 즉시 APPROVED 처리 (컴퓨터 화면 자동 로그인!)
+        conn.execute("""
+            UPDATE qr_login_sessions
+            SET status = 'APPROVED', user_id = ?
+            WHERE token = ?
+        """, (user["id"], token))
+        conn.commit()
+        conn.close()
+
+        session.pop(f"qr_quick_reg_challenge_{token}", None)
+
+        return jsonify({
+            "success": True,
+            "message": f"🎉 {user['username']}님의 스마트폰 지문이 현재 도메인에 등록되었으며, 컴퓨터 화면이 자동 로그인되었습니다!"
+        })
+    except Exception as err:
+        conn.close()
+        return jsonify({"success": False, "message": f"패스키 등록 실패: {str(err)}"}), 400
 
 
 @app.route("/")

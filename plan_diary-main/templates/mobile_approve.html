@@ -155,11 +155,25 @@
         </button>
 
         <button type="button" class="reject-btn" onclick="window.close();">거절 및 닫기</button>
-        <p style="margin-top: 18px; font-size: 12.5px; color: #666; line-height: 1.5; background: #fafaf5; border: 1px dashed #dcd8c8; border-radius: 8px; padding: 10px; text-align: left;">
-            💡 <b>이 사이트에 스마트폰 지문이 등록되지 않았나요?</b><br>
-            PC 모니터에서 먼저 아이디/비밀번호로 로그인한 뒤,<br>
-            상단의 <b>[📱 패스키(지문) 등록]</b>을 눌러 등록 QR을 스캔해 주세요.
-        </p>
+
+        <!-- 💡 [원클릭 지문 등록 & 즉시 컴퓨터 로그인] 섹션 -->
+        <div id="quickRegSection" style="margin-top: 18px; background: #fafaf5; border: 1.5px dashed #4c7a5e; border-radius: 12px; padding: 14px 16px; text-align: left;">
+            <div style="font-size: 13.5px; font-weight: 700; color: #2e543c; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between;">
+                <span>📱 이 폰 지문 신규 등록 & 컴퓨터 로그인</span>
+                <span style="font-size: 11px; background: #eaf2ed; color: #2e543c; padding: 2px 8px; border-radius: 10px; font-weight: 600;">1초 등록</span>
+            </div>
+            <p id="quickRegNotice" style="font-size: 12px; color: #555; margin: 0 0 10px; line-height: 1.45;">
+                스마트폰에 <b>"~에서 사용 가능한 로그인 정보 없음"</b>이 뜨거나 처음이신가요?<br>
+                비밀번호로 1회 확인 후 지문을 등록하시면 <b>컴퓨터도 즉시 자동 로그인</b>됩니다!
+            </p>
+            <div style="margin-bottom: 10px;">
+                <input type="password" id="regPasswordInput" placeholder="계정 비밀번호 입력 (예: admin1234!)" style="width: 100%; box-sizing: border-box; padding: 11px 13px; border: 1.5px solid #dcd8c8; border-radius: 8px; font-size: 14px; outline: none; background: #fff; transition: all 0.2s;">
+            </div>
+            <button type="button" class="approve-btn" id="quickRegBtn" onclick="handleQuickRegisterAndApprove()" style="background: #3b6d4e; font-size: 14px; padding: 13px;">
+                <span>👆</span>
+                <span>지금 이 폰 지문 등록 & 컴퓨터 로그인</span>
+            </button>
+        </div>
     </div>
 
     <div id="resultBox" class="result-box"></div>
@@ -243,6 +257,12 @@
 
             if (!optRes.ok || !optData.success) {
                 let msg = optData.message || '승인 옵션 생성 실패';
+                const passInput = document.getElementById('regPasswordInput');
+                if (passInput) {
+                    passInput.focus();
+                    passInput.style.borderColor = '#2e543c';
+                    passInput.style.boxShadow = '0 0 0 3px rgba(46,84,60,0.2)';
+                }
                 throw new Error(msg);
             }
 
@@ -290,10 +310,121 @@
         } catch (err) {
             btn.disabled = false;
             btn.innerHTML = origText;
+
+            const passInput = document.getElementById('regPasswordInput');
+            if (passInput) {
+                passInput.focus();
+                passInput.style.borderColor = '#c1512e';
+                passInput.style.boxShadow = '0 0 0 3px rgba(193, 81, 46, 0.2)';
+            }
+
+            resBox.className = 'result-box error';
+            resBox.style.display = 'block';
+
             if (err.name === 'NotAllowedError') {
-                alert('지문 인식이 취소되었거나 거절되었습니다.');
+                resBox.innerHTML = '<h3>💡 현재 도메인에 저장된 지문이 없습니다</h3><p>스마트폰에 <b>"' + location.hostname + '에서 사용 가능한 로그인 정보 없음"</b>이 표시되었나요?<br>WebAuthn 표준상 접속 주소(도메인)마다 지문을 1회 등록해야 합니다.<br>👉 <b>아래 비밀번호 입력란에 비밀번호를 넣고 [지금 이 폰 지문 등록 & 컴퓨터 로그인]</b>을 터치해 주세요!</p>';
             } else {
-                alert('승인 오류: ' + (err.message || err));
+                resBox.innerHTML = '<h3>⚠️ 지문 확인 안내</h3><p>' + escapeHtml(err.message || err) + '<br>👉 <b>아래에서 비밀번호를 입력하여 새 지문을 즉시 등록</b>할 수 있습니다.</p>';
+            }
+        }
+    }
+
+    async function handleQuickRegisterAndApprove() {
+        const usernameInput = document.getElementById('usernameInput');
+        const username = usernameInput ? usernameInput.value.trim() : '';
+        const passwordInput = document.getElementById('regPasswordInput');
+        const password = passwordInput ? passwordInput.value : '';
+        const btn = document.getElementById('quickRegBtn');
+        const resBox = document.getElementById('resultBox');
+        resBox.style.display = 'none';
+
+        if (!qrToken) {
+            alert('유효한 QR 토큰 정보가 없습니다. 컴퓨터 화면의 QR 코드를 다시 스캔해 주세요.');
+            return;
+        }
+
+        if (!username) {
+            alert('로그인할 아이디를 입력해 주세요.');
+            if (usernameInput) usernameInput.focus();
+            return;
+        }
+
+        if (!password) {
+            alert('계정 비밀번호를 입력해 주세요.');
+            if (passwordInput) passwordInput.focus();
+            return;
+        }
+
+        if (!window.PublicKeyCredential) {
+            alert('현재 스마트폰 브라우저가 생체인증(WebAuthn/Passkey)을 지원하지 않습니다.');
+            return;
+        }
+
+        const origText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span>⌛</span><span>스마트폰 지문 센서 대기 중...</span>';
+
+        try {
+            // 1. 등록 옵션 요청 (서버에서 비밀번호 검증 후 WebAuthn create 챌린지 발급)
+            const optRes = await fetch('/api/auth/qr/quick-register-options', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'ngrok-skip-browser-warning': 'true'
+                },
+                body: JSON.stringify({
+                    token: qrToken,
+                    username: username,
+                    password: password
+                })
+            });
+
+            const optData = await optRes.json();
+            if (!optRes.ok || !optData.success) {
+                throw new Error(optData.message || '등록 옵션 발급 실패');
+            }
+
+            // 2. 바이너리 버퍼 변환
+            optData.challenge = b64urlToBuffer(optData.challenge);
+            optData.user.id = b64urlToBuffer(optData.user.id);
+
+            // 3. 브라우저 생체인증(지문/Face ID) 등록 팝업 실행!
+            const credential = await navigator.credentials.create({ publicKey: optData });
+
+            // 4. 추출된 암호학적 attestation을 서버로 전송하여 DB 저장 + 컴퓨터 즉시 승인!
+            const verifyRes = await fetch('/api/auth/qr/quick-register-verify', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'ngrok-skip-browser-warning': 'true'
+                },
+                body: JSON.stringify({
+                    token: qrToken,
+                    username: username,
+                    id: credential.id,
+                    response: {
+                        attestationObject: bufferToB64url(credential.response.attestationObject),
+                        clientDataJSON: bufferToB64url(credential.response.clientDataJSON)
+                    }
+                })
+            });
+
+            const verifyData = await verifyRes.json();
+            if (verifyRes.ok && verifyData.success) {
+                document.getElementById('approveFormArea').style.display = 'none';
+                resBox.className = 'result-box success';
+                resBox.innerHTML = '<h3>🎉 지문 등록 및 컴퓨터 로그인 성공!</h3><p>스마트폰 지문이 현재 도메인에 안전하게 등록되었으며,<br>컴퓨터(PC) 화면이 <b>' + escapeHtml(username) + '</b>님으로 자동 로그인되었습니다!<br>모니터 화면을 확인해 주세요.</p>';
+                resBox.style.display = 'block';
+            } else {
+                throw new Error(verifyData.message || '지문 등록 검증 실패');
+            }
+        } catch (err) {
+            btn.disabled = false;
+            btn.innerHTML = origText;
+            if (err.name === 'NotAllowedError') {
+                alert('지문 등록이 취소되었거나 거절되었습니다.');
+            } else {
+                alert('등록 오류: ' + (err.message || err));
             }
         }
     }
@@ -303,6 +434,13 @@
         if (e.key === 'Enter') {
             e.preventDefault();
             handleMobileApprove();
+        }
+    });
+
+    document.getElementById('regPasswordInput')?.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            handleQuickRegisterAndApprove();
         }
     });
 </script>
